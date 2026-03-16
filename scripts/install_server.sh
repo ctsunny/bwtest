@@ -27,7 +27,6 @@ rand_hex() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex "${n}" 2>/dev/null && return
   fi
-  # fallback: od 几乎所有系统都有
   od -An -N"${n}" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | head -c$((n*2))
 }
 
@@ -58,7 +57,6 @@ detect_server_ip() {
 }
 
 install_deps() {
-  # 加 --no-install-recommends 防止拉起 redsocks 等无关推荐包
   if command -v apt-get >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
@@ -70,6 +68,13 @@ install_deps() {
   elif command -v apk >/dev/null 2>&1; then
     apk add --no-cache curl ca-certificates
   fi
+}
+
+# 读取文件头 4 字节判断是否 ELF 二进制，不依赖 file 命令
+is_elf() {
+  local magic
+  magic=$(od -An -N4 -tx1 "$1" 2>/dev/null | tr -d ' \n')
+  [[ "${magic}" == "7f454c46" ]]
 }
 
 ensure_user_group() {
@@ -95,14 +100,14 @@ download_binary() {
   log "尝试从 Release 下载预编译二进制..."
   http_code=$(curl --proto '=https' --tlsv1.2 -fsSL -w "%{http_code}" -o "${tmp}" "${release_url}" 2>/dev/null || echo "000")
 
-  if [[ "${http_code}" == "200" ]] && file "${tmp}" 2>/dev/null | grep -qE 'ELF|executable'; then
+  if [[ "${http_code}" == "200" ]] && is_elf "${tmp}"; then
     log "Release 下载成功 (${release_url})"
     systemctl stop "${BIN_NAME}" 2>/dev/null || true
     install -m 0755 "${tmp}" "${BIN_PATH}"
     rm -f "${tmp}"
   else
     rm -f "${tmp}"
-    warn "Release 未找到，回退至源码编译..."
+    warn "Release 未找到或校验失败，回退至源码编译..."
     build_from_source
   fi
 }
