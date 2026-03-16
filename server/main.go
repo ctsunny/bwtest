@@ -206,7 +206,6 @@ func main() {
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
-	// /api/data is read-only, no auth needed (panel session already protected by basicAuth)
 	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
 
 	p := cfg.PanelPath
@@ -242,8 +241,6 @@ func resetStuckTasks(db *sql.DB) {
 	_, _ = db.Exec(`UPDATE clients SET current_task=''`)
 }
 
-// watchStuckTasks 每30秒检查一次：如果客户端心跳超过90秒没有更新，
-// 但任务仍处于running状态，则重置为pending，让客户端重连后自动继续
 func watchStuckTasks(db *sql.DB, broker *Broker) {
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
@@ -1115,31 +1112,31 @@ const knownTaskStatus = {};
 function buildRunningRow(t) {
   const name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   const stopBtn = t.status === 'running'
-    ? `<form class="inline" method="post" action="${PANEL_PATH}/task/stop"><input type="hidden" name="task_id" value="${t.id}"><button type="submit" class="danger">停止</button></form>`
+    ? '<form class="inline" method="post" action="' + PANEL_PATH + '/task/stop"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger">停止</button></form>'
     : '<span class="note">-</span>';
-  return `<tr data-task-id="${t.id}" data-status="${t.status}">
-    <td>${name}</td><td>${t.mode}</td><td>${t.up_mbps}</td><td>${t.down_mbps}</td>
-    <td>${t.duration_sec} 秒</td>
-    <td><span class="badge ${t.status}">${t.status}</span></td>
-    <td class="up-col">${fmtGB(t.upload_bytes)}</td>
-    <td class="down-col">${fmtGB(t.download_bytes)}</td>
-    <td>${t.started_at}</td>
-    <td>${stopBtn}</td>
-  </tr>`;
+  return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
+    + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
+    + '<td>' + t.duration_sec + ' 秒</td>'
+    + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
+    + '<td class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
+    + '<td class="down-col">' + fmtGB(t.download_bytes) + '</td>'
+    + '<td>' + t.started_at + '</td>'
+    + '<td>' + stopBtn + '</td>'
+    + '</tr>';
 }
 
 function buildHistoryRow(t) {
   const name = clientNameMap[t.client_id] || t.client_name || t.client_id;
-  return `<tr data-task-id="${t.id}">
-    <td>${name}</td><td>${t.mode}</td><td>${t.up_mbps}</td><td>${t.down_mbps}</td>
-    <td>${t.duration_sec} 秒</td>
-    <td><span class="badge ${t.status}">${t.status}</span></td>
-    <td>${fmtGB(t.upload_bytes)}</td>
-    <td>${fmtGB(t.download_bytes)}</td>
-    <td>${t.started_at}</td>
-    <td>${t.finished_at}</td>
-    <td><form class="inline" method="post" action="${PANEL_PATH}/task/delete" onsubmit="return confirm('确认删除此任务记录？')"><input type="hidden" name="task_id" value="${t.id}"><button type="submit" class="danger">删除</button></form></td>
-  </tr>`;
+  return '<tr data-task-id="' + t.id + '">'
+    + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
+    + '<td>' + t.duration_sec + ' 秒</td>'
+    + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
+    + '<td>' + fmtGB(t.upload_bytes) + '</td>'
+    + '<td>' + fmtGB(t.download_bytes) + '</td>'
+    + '<td>' + t.started_at + '</td>'
+    + '<td>' + t.finished_at + '</td>'
+    + '<td><form class="inline" method="post" action="' + PANEL_PATH + '/task/delete" onsubmit="return confirm(\'确认删除此任务记录？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger">删除</button></form></td>'
+    + '</tr>';
 }
 
 function pollData() {
@@ -1162,10 +1159,10 @@ function pollData() {
         knownTaskStatus[t.id] = t.status;
       });
       runningTasks.forEach(t => {
-        if (!document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`)) needFullRefresh = true;
+        if (!document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
       });
       historyTasks.forEach(t => {
-        if (!document.querySelector(`#historyTaskBody [data-task-id="${t.id}"]`)) needFullRefresh = true;
+        if (!document.querySelector('#historyTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
       });
 
       if (needFullRefresh) {
@@ -1179,7 +1176,7 @@ function pollData() {
           : historyTasks.map(buildHistoryRow).join('');
       } else {
         runningTasks.forEach(t => {
-          const row = document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`);
+          const row = document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]');
           if (!row) return;
           const upCol = row.querySelector('.up-col');
           const dnCol = row.querySelector('.down-col');
@@ -1192,7 +1189,7 @@ function pollData() {
 
       const clients = data.clients || [];
       clients.forEach(c => {
-        const row = document.querySelector(`#clientBody [data-client-id="${c.id}"]`);
+        const row = document.querySelector('#clientBody [data-client-id="' + c.id + '"]');
         if (!row) return;
         if (c.last_seen) row.dataset.lastSeen = c.last_seen;
         const ctCell = row.querySelector('.curtask-col');
