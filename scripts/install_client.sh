@@ -60,7 +60,9 @@ parse_args() {
 
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -y -qq && apt-get install -y -qq curl ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      curl ca-certificates 2>/dev/null || true
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y -q curl ca-certificates shadow-utils
   elif command -v yum >/dev/null 2>&1; then
@@ -75,6 +77,13 @@ ensure_user_group() {
   id -u "${APP_USER}" >/dev/null 2>&1 || \
     useradd --system --gid "${APP_GROUP}" --home "${INSTALL_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
     useradd -r -g "${APP_GROUP}" -s /sbin/nologin "${APP_USER}" 2>/dev/null || true
+}
+
+# 读取文件头 4 字节判断是否 ELF 二进制，不依赖 file 命令
+is_elf() {
+  local magic
+  magic=$(od -An -N4 -tx1 "$1" 2>/dev/null | tr -d ' \n')
+  [[ "${magic}" == "7f454c46" ]]
 }
 
 # 优先 Release 下载，失败则回退源码编译
@@ -93,14 +102,14 @@ download_binary() {
   log "尝试从 Release 下载预编译二进制..."
   http_code=$(curl --proto '=https' --tlsv1.2 -fsSL -w "%{http_code}" -o "${tmp}" "${release_url}" 2>/dev/null || echo "000")
 
-  if [[ "${http_code}" == "200" ]] && file "${tmp}" 2>/dev/null | grep -qE 'ELF|executable'; then
+  if [[ "${http_code}" == "200" ]] && is_elf "${tmp}"; then
     log "Release 下载成功"
     systemctl stop "${BIN_NAME}" 2>/dev/null || true
     install -m 0755 "${tmp}" "${BIN_PATH}"
     rm -f "${tmp}"
   else
     rm -f "${tmp}"
-    log "Release 未找到，回退至源码编译..."
+    log "Release 未找到或校验失败，回退至源码编译..."
     build_from_source
   fi
 }
@@ -136,7 +145,6 @@ write_config() {
   [[ -n "${CLIENT_NAME}" ]] || CLIENT_NAME="$(hostname)"
   mkdir -p "${CONFIG_DIR}"
 
-  # 如果配置文件已存在（升级情况），只更新 server_url/init_token/name/remark
   if [[ -f "${CONFIG_FILE}" ]]; then
     log "配置文件已存在，更新 server_url / init_token / name"
     local tmp_cfg
