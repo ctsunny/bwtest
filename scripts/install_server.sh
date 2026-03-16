@@ -362,6 +362,15 @@ do_status() {
   print_info
 }
 
+do_restart() {
+  title "=== 重启 BWPanel 服务 ==="
+  log "正在重启服务..."
+  systemctl restart "${BIN_NAME}"
+  sleep 1
+  systemctl status "${BIN_NAME}" --no-pager -l
+  log "服务已重启"
+}
+
 do_uninstall() {
   title "=== 完整卸载 BWPanel ==="
   warn "即将删除所有数据和配置，此操作不可恢复！"
@@ -393,10 +402,11 @@ menu() {
     echo "  6. 重置客户端注册 Token"
     echo "  7. 配置 Bark 推送"
     echo "  8. 查看服务状态与日志"
-    echo "  9. 完整卸载"
+    echo "  9. 重启服务"
+    echo " 10. 完整卸载"
     echo "  0. 退出"
     echo -e "${CYAN}====================================${RESET}"
-    read -rp "请选择操作 [0-9]: " choice
+    read -rp "请选择操作 [0-10]: " choice
     case "${choice}" in
       1) do_install ;;
       2) do_upgrade ;;
@@ -406,7 +416,8 @@ menu() {
       6) do_reset_token ;;
       7) do_set_bark ;;
       8) do_status ;;
-      9) do_uninstall ;;
+      9) do_restart ;;
+     10) do_uninstall ;;
       0) echo "退出"; exit 0 ;;
       *) warn "无效选项，请重新输入" ;;
     esac
