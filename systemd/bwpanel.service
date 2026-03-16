@@ -1,0 +1,18 @@
+[Unit]
+Description=Bandwidth Test Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bwtest
+Group=bwtest
+WorkingDirectory=/opt/bwtest
+EnvironmentFile=/etc/default/bwpanel
+ExecStart=/usr/local/bin/bwpanel
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
