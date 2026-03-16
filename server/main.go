@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,6 +33,7 @@ type Config struct {
 	AdminPass  string
 	DBPath     string
 	PanelPath  string
+	BarkURL    string // e.g. https://api.day.app/your-token
 }
 
 type Client struct {
@@ -144,6 +146,26 @@ func (b *Broker) Publish(msg string) {
 	}
 }
 
+// barkPush sends a Bark notification. barkURL format: https://api.day.app/token
+func barkPush(barkURL, title, body string) {
+	if barkURL == "" {
+		return
+	}
+	base := strings.TrimRight(barkURL, "/")
+	pushURL := fmt.Sprintf("%s/%s/%s",
+		base,
+		url.PathEscape(title),
+		url.PathEscape(body),
+	)
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(pushURL)
+	if err != nil {
+		log.Printf("bark push error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+}
+
 func main() {
 	cfg := Config{
 		PanelAddr:  getenv("PANEL_ADDR", ":8080"),
@@ -154,6 +176,7 @@ func main() {
 		AdminPass:  getenv("ADMIN_PASS", "admin123456"),
 		DBPath:     getenv("DB_PATH", "/opt/bwtest/bwtest.db"),
 		PanelPath:  strings.TrimRight(getenv("PANEL_PATH", "/admin"), "/"),
+		BarkURL:    getenv("BARK_URL", ""),
 	}
 	if cfg.PanelPath == "" {
 		cfg.PanelPath = "/admin"
@@ -162,7 +185,12 @@ func main() {
 	db := mustInitDB(cfg.DBPath)
 	broker := NewBroker()
 
-	log.Printf("panel=%s%s data=%s db=%s", cfg.PanelAddr, cfg.PanelPath, cfg.DataAddr, cfg.DBPath)
+	// On startup: reset any tasks stuck in 'running' back to 'pending' so they
+	// get picked up again after a server/client restart.
+	resetStuckTasks(db)
+
+	log.Printf("panel=%s%s data=%s db=%s bark=%v",
+		cfg.PanelAddr, cfg.PanelPath, cfg.DataAddr, cfg.DBPath, cfg.BarkURL != "")
 
 	go runDataServer(cfg, db)
 
@@ -170,19 +198,18 @@ func main() {
 	mux.HandleFunc("/api/register", jsonHandler(handleRegister(cfg, db, broker)))
 	mux.HandleFunc("/api/heartbeat", jsonHandler(handleHeartbeat(db)))
 	mux.HandleFunc("/api/task/next", jsonHandler(handleNextTask(cfg, db, broker)))
-	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(db, broker)))
+	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
-
-	// /api/data: returns clients+tasks JSON for frontend polling (no auth needed beyond being on same panel)
 	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
 
 	p := cfg.PanelPath
 	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
-	mux.Handle(p+"/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(p, db, broker))))
+	mux.Handle(p+"/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(p, cfg, db, broker))))
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
-	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, db, broker))))
+	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
+	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 
 	if p != "/admin" {
@@ -192,6 +219,21 @@ func main() {
 	}
 
 	log.Fatal(http.ListenAndServe(cfg.PanelAddr, mux))
+}
+
+// resetStuckTasks resets running tasks to pending on server restart.
+func resetStuckTasks(db *sql.DB) {
+	res, err := db.Exec(`UPDATE tasks SET status='pending', started_at='' WHERE status='running'`)
+	if err != nil {
+		log.Printf("resetStuckTasks: %v", err)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		log.Printf("resetStuckTasks: reset %d running task(s) to pending", n)
+	}
+	// Also clear current_task on all clients so they pick up fresh
+	_, _ = db.Exec(`UPDATE clients SET current_task=''`)
 }
 
 func mustInitDB(path string) *sql.DB {
@@ -284,12 +326,10 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 		return
 	}
 
-	// clear per-connection deadline now that handshake is done
 	_ = conn.SetDeadline(time.Time{})
 
 	deadline := time.Now().Add(time.Duration(duration) * time.Second)
 
-	// resolve effective mode from hello (both mode client opens two connections)
 	effMode := hello.Mode
 	if effMode == "" {
 		effMode = mode
@@ -301,7 +341,6 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 	case "download":
 		_ = pacedWrite(conn, downMbps, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
 	case "both":
-		// legacy single-conn both: server reads and writes same conn
 		done := make(chan struct{})
 		go func() {
 			readDiscardLoop(conn, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
@@ -389,6 +428,11 @@ func handleRegister(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 				return
 			}
 			broker.Publish("clients")
+			// Bark: new client registration
+			go barkPush(cfg.BarkURL,
+				"新客户端申请",
+				fmt.Sprintf("客户端 %s (%s) 申请接入，请到面板批准。", req.Name, realIP(r)),
+			)
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "approved": false})
 			return
 		}
@@ -470,6 +514,15 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		_, _ = db.Exec(`UPDATE clients SET current_task=? WHERE id=?`, t.ID, clientID)
 		broker.Publish("tasks")
 
+		// Bark: task started
+		clientName := clientID
+		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
+		go barkPush(cfg.BarkURL,
+			"任务开始",
+			fmt.Sprintf("客户端 %s 开始执行任务\n模式:%s 上传:%dMbps 下载:%dMbps 时长:%ds",
+				clientName, t.Mode, t.UpMbps, t.DownMbps, t.DurationSec),
+		)
+
 		addr := cfg.DataAddr
 		if strings.HasPrefix(addr, ":") {
 			addr = cfg.ServerHost + addr
@@ -486,7 +539,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	}
 }
 
-func handleTaskResult(db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ResultReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -520,6 +573,27 @@ func handleTaskResult(db *sql.DB, broker *Broker) http.HandlerFunc {
 		_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, req.ClientID)
 
 		broker.Publish("tasks")
+
+		// Bark: task finished / stopped / failed
+		clientName := req.ClientID
+		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, req.ClientID).Scan(&clientName)
+		upGB := float64(req.UploadBytes) / (1024 * 1024 * 1024)
+		dnGB := float64(req.DownloadBytes) / (1024 * 1024 * 1024)
+		var barkTitle string
+		switch finalStatus {
+		case "done":
+			barkTitle = "任务完成"
+		case "stopped":
+			barkTitle = "任务已停止"
+		default:
+			barkTitle = "任务中断"
+		}
+		go barkPush(cfg.BarkURL,
+			barkTitle,
+			fmt.Sprintf("客户端 %s 任务结束 [%s]\n上传:%.3fGB 下载:%.3fGB",
+				clientName, finalStatus, upGB, dnGB),
+		)
+
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
@@ -579,7 +653,6 @@ func handleTaskProgress(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// handleAPIData returns clients and tasks as JSON for frontend polling.
 func handleAPIData(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clients := mustClients(db)
@@ -595,18 +668,18 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			CurrentTask string `json:"current_task"`
 		}
 		type taskJSON struct {
-			ID            string  `json:"id"`
-			ClientID      string  `json:"client_id"`
-			ClientName    string  `json:"client_name"`
-			Mode          string  `json:"mode"`
-			UpMbps        int     `json:"up_mbps"`
-			DownMbps      int     `json:"down_mbps"`
-			DurationSec   int     `json:"duration_sec"`
-			Status        string  `json:"status"`
-			StartedAt     string  `json:"started_at"`
-			FinishedAt    string  `json:"finished_at"`
-			UploadGB      float64 `json:"upload_gb"`
-			DownloadGB    float64 `json:"download_gb"`
+			ID          string  `json:"id"`
+			ClientID    string  `json:"client_id"`
+			ClientName  string  `json:"client_name"`
+			Mode        string  `json:"mode"`
+			UpMbps      int     `json:"up_mbps"`
+			DownMbps    int     `json:"down_mbps"`
+			DurationSec int     `json:"duration_sec"`
+			Status      string  `json:"status"`
+			StartedAt   string  `json:"started_at"`
+			FinishedAt  string  `json:"finished_at"`
+			UploadGB    float64 `json:"upload_gb"`
+			DownloadGB  float64 `json:"download_gb"`
 		}
 
 		clientNames := map[string]string{}
@@ -682,6 +755,7 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			ServerHost      string
 			InitToken       string
 			Version         string
+			BarkURL         string
 		}
 
 		var approvedClients []approvedClient
@@ -751,6 +825,7 @@ textarea{resize:vertical;min-height:60px}
   <p>客户端管理、任务下发和实时状态查看。</p>
   <div class="toolbar">
     <button type="button" onclick="location.reload()">手动刷新</button>
+    <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
     <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
   </div>
 </div>
@@ -924,16 +999,14 @@ const INIT_TOKEN  = "{{.InitToken}}";
 const PANEL_ADDR  = location.host;
 
 function fmtGB(gb) {
-  if (gb < 0.001) return '0.00 GB';
+  if (gb < 0.001) return '0.000 GB';
   return gb.toFixed(3) + ' GB';
 }
 
-// Poll /api/data every 5 seconds and update task rows + client table
 function pollData() {
   fetch('/api/data')
     .then(r => r.json())
     .then(data => {
-      // update task rows
       const tasks = data.tasks || [];
       tasks.forEach(t => {
         const row = document.querySelector('[data-task-id="' + t.id + '"]');
@@ -942,18 +1015,14 @@ function pollData() {
         const dnCol = row.querySelector('.down-col');
         if (upCol) upCol.textContent = fmtGB(t.upload_gb);
         if (dnCol) dnCol.textContent = fmtGB(t.download_gb);
-        // update badge
         const badge = row.querySelector('.badge');
         if (badge) {
           badge.className = 'badge ' + t.status;
           badge.textContent = t.status;
         }
       });
-      // update hint
       const hint = document.getElementById('taskRefreshHint');
       if (hint) hint.textContent = '(上次刷新: ' + new Date().toLocaleTimeString() + ')';
-
-      // update client last_seen every 60s via same data (refresh client table every 60s)
     })
     .catch(() => {});
 }
@@ -961,7 +1030,6 @@ function pollData() {
 setInterval(pollData, 5000);
 pollData();
 
-// SSE for notifications
 const es = new EventSource(PANEL_PATH + '/events');
 const liveStatus = document.getElementById('liveStatus');
 es.onmessage = function(e) {
@@ -1028,7 +1096,44 @@ function copyCmd() {
 			ServerHost:      cfg.ServerHost,
 			InitToken:       cfg.InitToken,
 			Version:         version,
+			BarkURL:         cfg.BarkURL,
 		})
+	}
+}
+
+// handleSettings: GET shows form, POST saves BARK_URL to env file and restarts.
+func handleSettings(panelPath string, cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_ = r.ParseForm()
+			newURL := strings.TrimSpace(r.Form.Get("bark_url"))
+			// Persist to /opt/bwtest/bark_url file so install script can pick up
+			_ = os.MkdirAll("/opt/bwtest", 0755)
+			_ = os.WriteFile("/opt/bwtest/bark_url", []byte(newURL), 0600)
+			// Update in-memory (takes effect for next push; full restart not required)
+			cfg.BarkURL = newURL
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		// GET: render simple form
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bark 设置</title>
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;padding:0 16px}
+input{width:100%%;padding:10px;border:1px solid #e5e7eb;border-radius:8px;font-size:14px;box-sizing:border-box}
+button{margin-top:12px;padding:10px 20px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px}
+a{color:#2563eb}label{font-size:13px;color:#6b7280}</style></head>
+<body><h2>⚙️ Bark 推送设置</h2>
+<p style="font-size:13px;color:#6b7280;margin-bottom:16px">填入 Bark URL（格式：<code>https://api.day.app/你的token</code>），留空则关闭推送。</p>
+<form method="post">
+<label>Bark URL</label><br>
+<input name="bark_url" value="%s" placeholder="https://api.day.app/xxxxxx" style="margin-top:6px">
+<br><button type="submit">保存</button>
+<a href="%s" style="margin-left:12px;font-size:13px">← 返回</a>
+</form>
+<p style="font-size:12px;color:#9ca3af;margin-top:20px">保存后立即生效，无需重启服务端。配置持久化到 /opt/bwtest/bark_url 文件。</p>
+</body></html>`, cfg.BarkURL, panelPath)
 	}
 }
 
@@ -1068,7 +1173,7 @@ func handleEvents(b *Broker) http.HandlerFunc {
 	}
 }
 
-func handleApprove(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleApprove(panelPath string, cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		clientID := r.Form.Get("client_id")
@@ -1092,7 +1197,7 @@ func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.Handler
 	}
 }
 
-func handleCreateTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 
