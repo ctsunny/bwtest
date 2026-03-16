@@ -201,7 +201,7 @@ func main() {
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
-	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, cfg))))
+	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg)))) // fix: &cfg
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 
 	if p != "/admin" {
@@ -943,7 +943,6 @@ function fmtGB(gb) {
   return gb.toFixed(3) + ' GB';
 }
 
-// 计算心跳延迟
 function calcPing(lastSeen) {
   if (!lastSeen) return null;
   const t = new Date(lastSeen);
@@ -958,7 +957,6 @@ function renderPing(sec) {
   return { text: sec + 's ⚠', cls: 'ping-dead' };
 }
 
-// 每秒更新客户端心跳延迟（纯前端计算，不需要额外请求）
 function tickPing() {
   document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
     const lastSeen = row.dataset.lastSeen;
@@ -977,7 +975,6 @@ function pollData() {
   fetch('/api/data')
     .then(r => r.json())
     .then(data => {
-      // 更新任务行
       const tasks = data.tasks || [];
       tasks.forEach(t => {
         const row = document.querySelector('[data-task-id="' + t.id + '"]');
@@ -989,7 +986,6 @@ function pollData() {
         const badge = row.querySelector('.badge');
         if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
       });
-      // 更新客户端行的 last_seen（让前端 ping 计算更准）
       const clients = data.clients || [];
       clients.forEach(c => {
         const row = document.querySelector('[data-client-id="' + c.id + '"]');
@@ -1018,7 +1014,6 @@ es.onerror = () => {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
-// 编辑客户端
 function openEdit(id, name, remark) {
   document.getElementById('editID').value = id;
   document.getElementById('editName').value = name;
@@ -1029,7 +1024,6 @@ function closeEdit() {
   document.getElementById('editModal').style.display = 'none';
 }
 
-// 升级命令弹窗
 function showUpgrade(clientName, clientId) {
   const panelUrl = location.protocol + '//' + PANEL_ADDR;
   const ver = VERSION || 'latest';
@@ -1052,7 +1046,6 @@ function copyUpgrade() {
   alert('已复制到剪贴板');
 }
 
-// 生成新安装命令
 function genCmd() {
   const name    = document.getElementById('genName').value.trim();
   const remark  = document.getElementById('genRemark').value.trim();
