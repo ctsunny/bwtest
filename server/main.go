@@ -170,21 +170,18 @@ func loadBarkURL(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// barkURLFromToken 把 token 拼接成完整 Bark URL
 func barkURLFromToken(token string) string {
 	token = strings.TrimSpace(token)
 	token = strings.Trim(token, "/")
 	if token == "" {
 		return ""
 	}
-	// 如果用户误填了完整 URL，直接原样返回
 	if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") {
 		return strings.TrimRight(token, "/")
 	}
 	return "https://api.day.app/" + token
 }
 
-// barkTokenFromURL 从完整 URL 提取 token
 func barkTokenFromURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	raw = strings.TrimRight(raw, "/")
@@ -771,7 +768,6 @@ func handleRestart(panelPath string) http.HandlerFunc {
 	}
 }
 
-// handleServerPage 服务器 Linux 管理页（含重启按钮）
 func handleServerPage(panelPath string, cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		barkToken := barkTokenFromURL(cfg.BarkURL)
@@ -835,6 +831,7 @@ document.getElementById('restartBtn').addEventListener('click', function() {
   if (!confirm('确认重启服务端？重启过程约1秒，期间面板短暂不可访问。')) return;
   fetch(PANEL_PATH + '/restart', {
     method: 'POST',
+    credentials: 'include',
     headers: {'Content-Type': 'application/json'}
   }).then(function() {
     alert('重启指令已发出，3秒后自动刷新页面。');
@@ -876,10 +873,9 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			InitToken       string
 			Version         string
 			BarkURL         string
-			// JS 安全输出用（已经过 json.Marshal，可直接嵌入 <script>）
-			PanelPathJS template.JS
-			InitTokenJS template.JS
-			VersionJS   template.JS
+			PanelPathJS     template.JS
+			InitTokenJS     template.JS
+			VersionJS       template.JS
 		}
 
 		var approvedClients []approvedClient
@@ -911,6 +907,13 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			return template.JS(b)
 		}
 
+		// ─────────────────────────────────────────────────────────────
+		// 核心修复说明：
+		// 1. 所有操作按钮（停止/删除/批准）全部改为 data-* 属性 + JS fetch
+		// 2. fetch 统一带 credentials:'include'，保证 Basic Auth cookie 正常传递
+		// 3. buildRunningRow / buildHistoryRow 里的按钮也全部用 data-task-id
+		//    通过事件委托(event delegation)处理，不再用 innerHTML 插入 form
+		// ─────────────────────────────────────────────────────────────
 		const page = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -934,7 +937,6 @@ button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
 button.danger{background:#ef4444;color:#fff}button.danger:hover{background:#dc2626}
 button.warn{background:#f59e0b;color:#fff}button.warn:hover{background:#d97706}
 button.info{background:#0891b2;color:#fff}button.info:hover{background:#0e7490}
-form.inline{display:inline}
 .tbl{overflow:auto}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px 9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;font-size:13px}
@@ -994,21 +996,18 @@ textarea{resize:vertical;min-height:60px}
 <div id="editModal" class="modal-overlay">
   <div class="modal-inner" style="width:min(480px,95vw)">
     <h2>编辑客户端</h2>
-    <form method="post" action="{{.PanelPath}}/client/edit">
-      <input type="hidden" id="editID" name="client_id">
-      <div style="margin-bottom:10px">
-        <label style="font-size:13px;color:var(--muted)">名称</label>
-        <input id="editName" name="name" placeholder="名称" style="margin-top:4px">
-      </div>
-      <div style="margin-bottom:14px">
-        <label style="font-size:13px;color:var(--muted)">备注</label>
-        <textarea id="editRemark" name="remark" placeholder="备注（可选）" style="margin-top:4px"></textarea>
-      </div>
-      <div style="display:flex;gap:8px">
-        <button type="submit">保存</button>
-        <button type="button" class="sec" id="closeEditBtn">取消</button>
-      </div>
-    </form>
+    <div style="margin-bottom:10px">
+      <label style="font-size:13px;color:var(--muted)">名称</label>
+      <input id="editName" placeholder="名称" style="margin-top:4px">
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;color:var(--muted)">备注</label>
+      <textarea id="editRemark" placeholder="备注（可选）" style="margin-top:4px"></textarea>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button type="button" id="saveEditBtn">保存</button>
+      <button type="button" class="sec" id="closeEditBtn">取消</button>
+    </div>
   </div>
 </div>
 
@@ -1019,7 +1018,7 @@ textarea{resize:vertical;min-height:60px}
     <thead><tr><th>名称</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
-    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}">
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-approved="{{if .Approved}}1{{else}}0{{end}}">
       <td>{{.Name}}</td>
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
@@ -1030,10 +1029,7 @@ textarea{resize:vertical;min-height:60px}
       <td>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
         {{if (not .Approved)}}
-        <form class="inline" method="post" action="{{$.PanelPath}}/approve">
-          <input type="hidden" name="client_id" value="{{.ID}}">
-          <button type="submit">批准</button>
-        </form>
+        <button type="button" class="approve-btn" data-id="{{.ID}}">批准</button>
         {{end}}
         <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
         <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级命令</button>
@@ -1142,10 +1138,7 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.StartedAt}}</td>
       <td>
         {{if eq .Status "running"}}
-        <form class="inline" method="post" action="{{$.PanelPath}}/task/stop">
-          <input type="hidden" name="task_id" value="{{.ID}}">
-          <button type="submit" class="danger">停止</button>
-        </form>
+        <button type="button" class="danger stop-btn" data-task-id="{{.ID}}">停止</button>
         {{else}}<span class="note">-</span>{{end}}
       </td>
     </tr>
@@ -1176,10 +1169,7 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.StartedAt}}</td>
       <td>{{.FinishedAt}}</td>
       <td>
-        <form class="inline" method="post" action="{{$.PanelPath}}/task/delete" onsubmit="return confirm('确认删除此任务记录？')">
-          <input type="hidden" name="task_id" value="{{.ID}}">
-          <button type="submit" class="danger">删除</button>
-        </form>
+        <button type="button" class="danger delete-btn" data-task-id="{{.ID}}">删除</button>
       </td>
     </tr>
     {{end}}
@@ -1197,6 +1187,17 @@ var PANEL_PATH = {{.PanelPathJS}};
 var INIT_TOKEN  = {{.InitTokenJS}};
 var PANEL_ADDR  = location.host;
 var VERSION     = {{.VersionJS}};
+
+// ── 通用 fetch 封装，自动带 credentials ──
+function apiFetch(path, body) {
+  var opts = {
+    method: 'POST',
+    credentials: 'include',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+  };
+  if (body) opts.body = body;
+  return fetch(PANEL_PATH + path, opts);
+}
 
 var clientNameMap = {};
 document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
@@ -1234,10 +1235,11 @@ tickPing();
 
 var knownTaskStatus = {};
 
+// 动态行：停止按钮用 data-task-id + class="stop-btn"，不再内嵌 form
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   var stopBtn = t.status === 'running'
-    ? '<form class="inline" method="post" action="' + PANEL_PATH + '/task/stop"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger">停止</button></form>'
+    ? '<button type="button" class="danger stop-btn" data-task-id="' + t.id + '">停止</button>'
     : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
@@ -1250,6 +1252,7 @@ function buildRunningRow(t) {
     + '</tr>';
 }
 
+// 动态行：删除按钮用 data-task-id + class="delete-btn"，不再内嵌 form
 function buildHistoryRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   return '<tr data-task-id="' + t.id + '">'
@@ -1260,12 +1263,12 @@ function buildHistoryRow(t) {
     + '<td>' + fmtGB(t.download_bytes) + '</td>'
     + '<td>' + t.started_at + '</td>'
     + '<td>' + t.finished_at + '</td>'
-    + '<td><form class="inline" method="post" action="' + PANEL_PATH + '/task/delete" onsubmit="return confirm(\'确认删除此任务记录？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger">删除</button></form></td>'
+    + '<td><button type="button" class="danger delete-btn" data-task-id="' + t.id + '">删除</button></td>'
     + '</tr>';
 }
 
 function pollData() {
-  fetch('/api/data')
+  fetch('/api/data', {credentials: 'include'})
     .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function(data) {
       var tasks = data.tasks || [];
@@ -1309,6 +1312,16 @@ function pollData() {
           if (dnCol) dnCol.textContent = fmtGB(t.download_bytes);
           var badge = row.querySelector('.badge');
           if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
+          // 同步停止按钮状态：running 时显示按钮，否则隐藏
+          var opCell = row.cells[row.cells.length - 1];
+          if (opCell) {
+            var existBtn = opCell.querySelector('.stop-btn');
+            if (t.status === 'running' && !existBtn) {
+              opCell.innerHTML = '<button type="button" class="danger stop-btn" data-task-id="' + t.id + '">停止</button>';
+            } else if (t.status !== 'running' && existBtn) {
+              opCell.innerHTML = '<span class="note">-</span>';
+            }
+          }
         });
       }
 
@@ -1343,17 +1356,98 @@ es.onerror = function() {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
+// ── 事件委托：停止任务 ──
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.stop-btn');
+  if (!btn) return;
+  var taskId = btn.dataset.taskId;
+  if (!taskId) return;
+  if (!confirm('确认停止此任务？')) return;
+  btn.disabled = true;
+  btn.textContent = '停止中...';
+  apiFetch('/task/stop', 'task_id=' + encodeURIComponent(taskId))
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status);
+      pollData();
+    })
+    .catch(function(err) {
+      alert('停止失败: ' + err);
+      btn.disabled = false;
+      btn.textContent = '停止';
+    });
+});
+
+// ── 事件委托：删除任务 ──
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.delete-btn');
+  if (!btn) return;
+  var taskId = btn.dataset.taskId;
+  if (!taskId) return;
+  if (!confirm('确认删除此任务记录？')) return;
+  btn.disabled = true;
+  apiFetch('/task/delete', 'task_id=' + encodeURIComponent(taskId))
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status);
+      pollData();
+    })
+    .catch(function(err) {
+      alert('删除失败: ' + err);
+      btn.disabled = false;
+    });
+});
+
+// ── 事件委托：批准客户端 ──
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.approve-btn');
+  if (!btn) return;
+  var clientId = btn.dataset.id;
+  if (!clientId) return;
+  btn.disabled = true;
+  btn.textContent = '批准中...';
+  apiFetch('/approve', 'client_id=' + encodeURIComponent(clientId))
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status);
+      location.reload();
+    })
+    .catch(function(err) {
+      alert('批准失败: ' + err);
+      btn.disabled = false;
+      btn.textContent = '批准';
+    });
+});
+
 // ── 编辑客户端弹窗 ──
+var editClientId = '';
 document.getElementById('closeEditBtn').addEventListener('click', function() {
   document.getElementById('editModal').classList.remove('open');
 });
 document.addEventListener('click', function(e) {
   var btn = e.target.closest('.edit-btn');
   if (!btn) return;
-  document.getElementById('editID').value    = btn.dataset.id;
-  document.getElementById('editName').value  = btn.dataset.name;
+  editClientId = btn.dataset.id;
+  document.getElementById('editName').value   = btn.dataset.name || '';
   document.getElementById('editRemark').value = btn.dataset.remark || '';
   document.getElementById('editModal').classList.add('open');
+});
+document.getElementById('saveEditBtn').addEventListener('click', function() {
+  var name   = document.getElementById('editName').value.trim();
+  var remark = document.getElementById('editRemark').value.trim();
+  if (!name) { alert('名称不能为空'); return; }
+  var saveBtn = document.getElementById('saveEditBtn');
+  saveBtn.disabled = true;
+  apiFetch('/client/edit',
+    'client_id=' + encodeURIComponent(editClientId) +
+    '&name='      + encodeURIComponent(name) +
+    '&remark='    + encodeURIComponent(remark))
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status);
+      document.getElementById('editModal').classList.remove('open');
+      location.reload();
+    })
+    .catch(function(err) {
+      alert('保存失败: ' + err);
+      saveBtn.disabled = false;
+    });
 });
 
 // ── 升级命令弹窗 ──
@@ -1413,8 +1507,6 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 </body>
 </html>`
 
-
-
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
 			"not": func(b bool) bool { return !b },
 			"index": func(m map[string]string, k string) string {
@@ -1452,7 +1544,14 @@ func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.Handler
 		taskID := r.Form.Get("task_id")
 		_, _ = db.Exec(`DELETE FROM tasks WHERE id=? AND status NOT IN ('running','stopping')`, taskID)
 		broker.Publish("tasks")
-		http.Redirect(w, r, panelPath, http.StatusFound)
+		// 支持 fetch 调用（返回 JSON）和传统 form 跳转
+		if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" &&
+			r.Header.Get("Accept") == "" {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
 
@@ -1527,7 +1626,8 @@ func handleApprove(panelPath string, cfg Config, db *sql.DB, broker *Broker) htt
 		clientID := r.Form.Get("client_id")
 		_, _ = db.Exec(`UPDATE clients SET approved=1 WHERE id=?`, clientID)
 		broker.Publish("clients")
-		http.Redirect(w, r, panelPath, http.StatusFound)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
 
@@ -1541,7 +1641,8 @@ func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.Handler
 			_, _ = db.Exec(`UPDATE clients SET name=?, remark=? WHERE id=?`, name, remark, clientID)
 		}
 		broker.Publish("clients")
-		http.Redirect(w, r, panelPath, http.StatusFound)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
 
@@ -1582,7 +1683,8 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 		taskID := r.Form.Get("task_id")
 		_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=? AND status='running'`, taskID)
 		broker.Publish("tasks")
-		http.Redirect(w, r, panelPath, http.StatusFound)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
 
@@ -1660,7 +1762,7 @@ func genToken(n int) string {
 }
 
 func getenv(k, d string) string {
-	if v := os.Getenv(k); v != "" {
+	if v := os.Getenv(k); v != ""; {
 		return v
 	}
 	return d
