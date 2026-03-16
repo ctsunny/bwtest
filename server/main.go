@@ -1507,6 +1507,7 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 </body>
 </html>`
 
+
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
 			"not": func(b bool) bool { return !b },
 			"index": func(m map[string]string, k string) string {
@@ -1762,7 +1763,7 @@ func genToken(n int) string {
 }
 
 func getenv(k, d string) string {
-	if v := os.Getenv(k); v != ""; {
+	if v := os.Getenv(k); v != "" {
 		return v
 	}
 	return d
