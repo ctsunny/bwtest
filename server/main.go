@@ -201,7 +201,7 @@ func main() {
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
-	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg)))) // fix: &cfg
+	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 
 	if p != "/admin" {
@@ -699,7 +699,8 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 body{margin:0;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
 .wrap{max-width:1400px;margin:0 auto}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
-h1{margin:0 0 6px;font-size:36px}h2{margin:0 0 14px;font-size:20px}p{margin:0;color:var(--muted);font-size:14px}
+h1{margin:0 0 4px;font-size:36px}h2{margin:0 0 14px;font-size:20px}p{margin:0;color:var(--muted);font-size:14px}
+.ver-badge{display:inline-block;background:#dbeafe;color:#1d4ed8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;margin-left:10px;vertical-align:middle}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
 .note{font-size:13px;color:var(--muted)}
 #liveStatus{font-size:13px;color:var(--muted)}
@@ -741,7 +742,7 @@ textarea{resize:vertical;min-height:60px}
 <div class="wrap">
 
 <div class="card">
-  <h1>带宽测试面板</h1>
+  <h1>带宽测试面板 <span class="ver-badge">{{.Version}}</span></h1>
   <p>客户端管理、任务下发和实时状态查看。</p>
   <div class="toolbar">
     <button type="button" onclick="location.reload()">手动刷新</button>
