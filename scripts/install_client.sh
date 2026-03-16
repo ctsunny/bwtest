@@ -11,10 +11,12 @@ CONFIG_DIR="/etc/bwagent"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 ENV_FILE="/etc/default/${BIN_NAME}"
 SERVICE_FILE="/etc/systemd/system/${BIN_NAME}.service"
+SOURCE_DIR="/opt/bwtest-src"
 
 SERVER_URL=""
 INIT_TOKEN=""
 CLIENT_NAME=""
+REMARK=""
 VERSION="latest"
 
 log() { echo -e "\033[1;32m[INFO]\033[0m $*"; }
@@ -26,16 +28,17 @@ Usage:
   bash install_client.sh [options]
 
 Options:
-  --server-url     Required, e.g. http://1.2.3.4:8080
-  --init-token     Required
-  --client-name    Default hostname
-  --version        Default latest
+  --server-url     必填, e.g. http://1.2.3.4:8080
+  --init-token     必填
+  --client-name    默认 hostname
+  --remark         备注 (可选)
+  --version        默认 latest
 EOF
 }
 
 detect_arch() {
   case "$(uname -m)" in
-    x86_64|amd64) echo "amd64" ;;
+    x86_64|amd64)  echo "amd64" ;;
     aarch64|arm64) echo "arm64" ;;
     *) err "Unsupported architecture: $(uname -m)"; exit 1 ;;
   esac
@@ -44,10 +47,11 @@ detect_arch() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --server-url) SERVER_URL="${2:-}"; shift 2 ;;
-      --init-token) INIT_TOKEN="${2:-}"; shift 2 ;;
+      --server-url)  SERVER_URL="${2:-}";  shift 2 ;;
+      --init-token)  INIT_TOKEN="${2:-}";  shift 2 ;;
       --client-name) CLIENT_NAME="${2:-}"; shift 2 ;;
-      --version) VERSION="${2:-}"; shift 2 ;;
+      --remark)      REMARK="${2:-}";      shift 2 ;;
+      --version)     VERSION="${2:-}";     shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) err "Unknown arg: $1"; usage; exit 1 ;;
     esac
@@ -56,48 +60,94 @@ parse_args() {
 
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -y
-    apt-get install -y curl ca-certificates
+    apt-get update -y -qq && apt-get install -y -qq curl ca-certificates
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl ca-certificates shadow-utils
+    dnf install -y -q curl ca-certificates shadow-utils
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl ca-certificates shadow-utils
+    yum install -y -q curl ca-certificates shadow-utils
   elif command -v apk >/dev/null 2>&1; then
     apk add --no-cache curl ca-certificates
   fi
 }
 
 ensure_user_group() {
-  if ! getent group "${APP_GROUP}" >/dev/null 2>&1; then
-    groupadd --system "${APP_GROUP}" 2>/dev/null || true
-  fi
-  if ! id -u "${APP_USER}" >/dev/null 2>&1; then
+  getent group "${APP_GROUP}" >/dev/null 2>&1 || groupadd --system "${APP_GROUP}" 2>/dev/null || true
+  id -u "${APP_USER}" >/dev/null 2>&1 || \
     useradd --system --gid "${APP_GROUP}" --home "${INSTALL_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
     useradd -r -g "${APP_GROUP}" -s /sbin/nologin "${APP_USER}" 2>/dev/null || true
-  fi
 }
 
+# 优先 Release 下载，失败则回退源码编译
 download_binary() {
-  local arch asset url tmp
+  local arch asset release_url tmp http_code
   arch="$(detect_arch)"
   asset="${BIN_NAME}-linux-${arch}"
 
   if [[ "${VERSION}" == "latest" ]]; then
-    url="https://github.com/${REPO}/releases/latest/download/${asset}"
+    release_url="https://github.com/${REPO}/releases/latest/download/${asset}"
   else
-    url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
+    release_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
   fi
 
   tmp="$(mktemp)"
-  log "Downloading ${url}"
-  curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp"
-  install -m 0755 "$tmp" "${BIN_PATH}"
-  rm -f "$tmp"
+  log "尝试从 Release 下载预编译二进制..."
+  http_code=$(curl --proto '=https' --tlsv1.2 -fsSL -w "%{http_code}" -o "${tmp}" "${release_url}" 2>/dev/null || echo "000")
+
+  if [[ "${http_code}" == "200" ]] && file "${tmp}" 2>/dev/null | grep -qE 'ELF|executable'; then
+    log "Release 下载成功"
+    systemctl stop "${BIN_NAME}" 2>/dev/null || true
+    install -m 0755 "${tmp}" "${BIN_PATH}"
+    rm -f "${tmp}"
+  else
+    rm -f "${tmp}"
+    log "Release 未找到，回退至源码编译..."
+    build_from_source
+  fi
+}
+
+build_from_source() {
+  if ! command -v go >/dev/null 2>&1; then
+    log "安装 Go 运行时..."
+    local go_ver="1.22.5" arch
+    arch="$(detect_arch)"
+    curl -fsSL "https://go.dev/dl/go${go_ver}.linux-${arch}.tar.gz" | tar -C /usr/local -xz
+    export PATH="/usr/local/go/bin:${PATH}"
+  fi
+
+  log "拉取最新源码..."
+  if [[ -d "${SOURCE_DIR}/.git" ]]; then
+    git -C "${SOURCE_DIR}" pull --ff-only
+  else
+    git clone --depth 1 "https://github.com/${REPO}.git" "${SOURCE_DIR}"
+  fi
+
+  log "编译 ${BIN_NAME}..."
+  CGO_ENABLED=0 go build -C "${SOURCE_DIR}" \
+    -trimpath -ldflags "-s -w" \
+    -o /tmp/${BIN_NAME}_new ./client/
+
+  systemctl stop "${BIN_NAME}" 2>/dev/null || true
+  install -m 0755 /tmp/${BIN_NAME}_new "${BIN_PATH}"
+  rm -f /tmp/${BIN_NAME}_new
+  log "编译完成"
 }
 
 write_config() {
   [[ -n "${CLIENT_NAME}" ]] || CLIENT_NAME="$(hostname)"
   mkdir -p "${CONFIG_DIR}"
+
+  # 如果配置文件已存在（升级情况），只更新 server_url/init_token/name/remark
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    log "配置文件已存在，更新 server_url / init_token / name"
+    local tmp_cfg
+    tmp_cfg=$(cat "${CONFIG_FILE}")
+    echo "${tmp_cfg}" \
+      | sed "s|\"server_url\":[^,}]*|\"server_url\": \"${SERVER_URL}\"|" \
+      | sed "s|\"init_token\":[^,}]*|\"init_token\": \"${INIT_TOKEN}\"|" \
+      | sed "s|\"name\":[^,}]*|\"name\": \"${CLIENT_NAME}\"|" \
+      > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+    return
+  fi
 
   cat > "${CONFIG_FILE}" <<EOF
 {
@@ -108,16 +158,8 @@ write_config() {
   "client_token": ""
 }
 EOF
-
   chmod 600 "${CONFIG_FILE}"
   chown -R "${APP_USER}:${APP_GROUP}" "${CONFIG_DIR}"
-}
-
-write_env() {
-  mkdir -p /etc/default
-  cat > "${ENV_FILE}" <<'EOF'
-EOF
-  chmod 644 "${ENV_FILE}"
 }
 
 write_service() {
@@ -132,7 +174,6 @@ Type=simple
 User=${APP_USER}
 Group=${APP_GROUP}
 WorkingDirectory=${INSTALL_DIR}
-EnvironmentFile=-${ENV_FILE}
 ExecStart=${BIN_PATH} ${CONFIG_FILE}
 Restart=always
 RestartSec=3
@@ -157,19 +198,17 @@ main() {
 
   download_binary
   write_config
-  write_env
   write_service
 
   systemctl daemon-reload
   systemctl enable --now "${BIN_NAME}"
 
-  log "Installed successfully"
+  log "安装/升级完成"
   echo
-  echo "Config: ${CONFIG_FILE}"
-  echo "Commands:"
+  echo "配置文件: ${CONFIG_FILE}"
+  echo "常用命令:"
   echo "  systemctl status ${BIN_NAME}"
   echo "  journalctl -u ${BIN_NAME} -f"
-  echo "  cat ${CONFIG_FILE}"
 }
 
 main "$@"

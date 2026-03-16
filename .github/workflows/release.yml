@@ -1,15 +1,13 @@
-name: release
+name: Build & Release
 
 on:
   push:
     tags:
-      - "v*"
-
-permissions:
-  contents: write
+      - 'v*.*.*'
 
 jobs:
   build:
+    name: Build binaries
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -18,30 +16,87 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: '1.22'
+          cache: true
 
-      - name: Build server
+      - name: Build bwpanel (server)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
         run: |
-          mkdir -p dist
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -ldflags="-s -w" -o dist/bwpanel-${{ matrix.goos }}-${{ matrix.goarch }} ./server
+          go build -trimpath -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o bwpanel-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./server/
 
-      - name: Build client
+      - name: Build bwagent (client)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
         run: |
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -ldflags="-s -w" -o dist/bwagent-${{ matrix.goos }}-${{ matrix.goarch }} ./client
+          go build -trimpath -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o bwagent-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./client/
 
-      - name: Upload release assets
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            bwpanel-${{ matrix.goos }}-${{ matrix.goarch }}
+            bwagent-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List files
+        run: ls -lh dist/
+
+      - name: Create Release & upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/bwpanel-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/bwagent-${{ matrix.goos }}-${{ matrix.goarch }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## 安装 / 升级
+
+            **服务端一键安装:**
+            ```bash
+            bash <(curl -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_server.sh)
+            ```
+
+            **客户端一键安装 (在面板复制命令):**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s -- --server-url http://YOUR_IP:PORT --init-token YOUR_TOKEN --client-name my-vps
+            ```
+
+            **升级方式:**
+            - 服务端: 重新运行 `bwpanel-menu` 选择菜单 2
+            - 客户端: 重新运行安装命令（配置保留）
+
+            ## 下载
+            | 平台 | 服务端 | 客户端 |
+            |---|---|---|
+            | Linux x86_64 | `bwpanel-linux-amd64` | `bwagent-linux-amd64` |
+            | Linux ARM64  | `bwpanel-linux-arm64` | `bwagent-linux-arm64` |
+          files: dist/*
+          draft: false
+          prerelease: false
