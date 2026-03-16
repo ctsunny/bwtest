@@ -23,7 +23,14 @@ title(){ echo -e "\n${CYAN}$*${RESET}"; }
 rand_hex() { openssl rand -hex "${1:-16}" 2>/dev/null || head -c "${1:-16}" /dev/urandom | xxd -p -c256; }
 
 rand_port() {
-  echo $(( RANDOM % 40000 + 20000 ))
+  while true; do
+    local p=$(( RANDOM % 40000 + 20000 ))
+    # check port not in use
+    if ! ss -lntp 2>/dev/null | grep -q ":${p} " ; then
+      echo "${p}"
+      return
+    fi
+  done
 }
 
 rand_path() {
@@ -74,6 +81,7 @@ download_binary() {
   log "下载: ${url}"
   tmp="$(mktemp)"
   curl --proto '=https' --tlsv1.2 -fsSL "${url}" -o "${tmp}"
+  # 必须先停服务再替换二进制，否则 Linux 会报 Text file busy
   systemctl stop "${BIN_NAME}" 2>/dev/null || true
   install -m 0755 "${tmp}" "${BIN_PATH}"
   rm -f "${tmp}"
@@ -135,12 +143,12 @@ print_info() {
   admin_pass=$(grep ADMIN_PASS "${ENV_FILE}" | cut -d= -f2)
   init_token=$(grep INIT_TOKEN "${ENV_FILE}" | cut -d= -f2)
   echo
-  echo -e "  ${CYAN}面板地址${RESET}  : http://${server_host}:${panel_port}${panel_path}"
-  echo -e "  ${CYAN}用户名  ${RESET}  : admin"
-  echo -e "  ${CYAN}密码    ${RESET}  : ${admin_pass}"
-  echo -e "  ${CYAN}注册Token${RESET}: ${init_token}"
-  echo -e "  ${CYAN}常用命令${RESET}  : systemctl status ${BIN_NAME}  |  journalctl -u ${BIN_NAME} -f"
-  echo -e "  ${CYAN}管理脚本${RESET}  : bwpanel-menu"
+  echo -e "  ${CYAN}面板地址${RESET}    : http://${server_host}:${panel_port}${panel_path}"
+  echo -e "  ${CYAN}用户名  ${RESET}    : admin"
+  echo -e "  ${CYAN}密码    ${RESET}    : ${admin_pass}"
+  echo -e "  ${CYAN}注册Token${RESET} : ${init_token}"
+  echo -e "  ${CYAN}常用命令${RESET}    : systemctl status ${BIN_NAME}  |  journalctl -u ${BIN_NAME} -f"
+  echo -e "  ${CYAN}管理脚本${RESET}    : bwpanel-menu"
   echo
 }
 
@@ -202,11 +210,13 @@ do_upgrade() {
   echo "当前版本: ${current_ver}"
   read -rp "目标版本 [回车使用 latest]: " VERSION
   VERSION=${VERSION:-latest}
+  # download_binary 内部已处理 stop/replace/start
   download_binary "${VERSION}"
   sed -i "s/^BWPANEL_VERSION=.*/BWPANEL_VERSION=${VERSION}/" "${ENV_FILE}" 2>/dev/null || true
   systemctl start "${BIN_NAME}"
   systemctl status "${BIN_NAME}" --no-pager -l
   log "升级完成！"
+  print_info
 }
 
 do_reset_pass() {
@@ -216,7 +226,7 @@ do_reset_pass() {
   NEW_PASS=${NEW_PASS:-${auto_pass}}
   sed -i "s/^ADMIN_PASS=.*/ADMIN_PASS=${NEW_PASS}/" "${ENV_FILE}"
   systemctl restart "${BIN_NAME}"
-  log "密码已更新: ${NEW_PASS}"
+  log "密码已更新"
   print_info
 }
 
@@ -239,7 +249,7 @@ do_reset_token() {
   NEW_TOKEN=${NEW_TOKEN:-${auto_token}}
   sed -i "s/^INIT_TOKEN=.*/INIT_TOKEN=${NEW_TOKEN}/" "${ENV_FILE}"
   systemctl restart "${BIN_NAME}"
-  log "Token 已更新: ${NEW_TOKEN}"
+  log "Token 已更新"
   print_info
 }
 
@@ -284,7 +294,7 @@ menu() {
     echo "  7. 查看服务状态与日志"
     echo "  8. 完整卸载"
     echo "  0. 退出"
-    echo -e "${CYAN}===================================${RESET}"
+    echo -e "${CYAN}====================================${RESET}"
     read -rp "请选择操作 [0-8]: " choice
     case "${choice}" in
       1) do_install ;;
