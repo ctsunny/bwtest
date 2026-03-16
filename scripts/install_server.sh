@@ -21,7 +21,15 @@ warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 err()  { echo -e "${RED}[ERR ]${RESET} $*" >&2; }
 title(){ echo -e "\n${CYAN}$*${RESET}"; }
 
-rand_hex() { openssl rand -hex "${1:-16}" 2>/dev/null || head -c "${1:-16}" /dev/urandom | xxd -p -c256; }
+# 不依赖 xxd/openssl，纯 shell 实现随机 hex 字符串
+rand_hex() {
+  local n=${1:-16}
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "${n}" 2>/dev/null && return
+  fi
+  # fallback: od 几乎所有系统都有
+  od -An -N"${n}" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | head -c$((n*2))
+}
 
 rand_port() {
   while true; do
@@ -50,12 +58,17 @@ detect_server_ip() {
 }
 
 install_deps() {
+  # 加 --no-install-recommends 防止拉起 redsocks 等无关推荐包
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq curl ca-certificates xxd 2>/dev/null || apt-get install -y -qq curl ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      curl ca-certificates 2>/dev/null || true
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y -q curl ca-certificates vim-common
+    dnf install -y -q curl ca-certificates
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y -q curl ca-certificates vim-common
+    yum install -y -q curl ca-certificates
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache curl ca-certificates
   fi
 }
 
@@ -66,8 +79,6 @@ ensure_user_group() {
     useradd -r -g "${APP_GROUP}" -s /sbin/nologin "${APP_USER}" 2>/dev/null || true
 }
 
-# 优先从 GitHub Release 下载预编译二进制
-# 若 Release 不存在（如开发测试期间）肇回源码编译
 download_binary() {
   local version="${1:-latest}" arch asset release_url tmp http_code
   arch="$(detect_arch)"
@@ -140,7 +151,6 @@ PANEL_PATH=${panel_path}
 BWPANEL_VERSION=${version}
 EOF
   chmod 600 "${ENV_FILE}"
-  # 如果存在 Bark URL 文件，将其写入 env
   if [[ -f "${INSTALL_DIR}/bark_url" ]]; then
     echo "BARK_URL=$(cat ${INSTALL_DIR}/bark_url)" >> "${ENV_FILE}"
   fi
@@ -251,7 +261,6 @@ do_upgrade() {
   current_ver=$(grep BWPANEL_VERSION "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "unknown")
   echo "当前版本: ${current_ver}"
 
-  # 获取 latest tag 名径
   log "查询 GitHub 最新 Release..."
   local latest_ver
   latest_ver=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
@@ -269,7 +278,6 @@ do_upgrade() {
   download_binary "${VERSION}"
   sed -i "s/^BWPANEL_VERSION=.*/BWPANEL_VERSION=${VERSION}/" "${ENV_FILE}" 2>/dev/null || true
 
-  # 如果存在新保存的 bark_url 将其同步到 env
   if [[ -f "${INSTALL_DIR}/bark_url" ]]; then
     if grep -q '^BARK_URL=' "${ENV_FILE}" 2>/dev/null; then
       sed -i "s|^BARK_URL=.*|BARK_URL=$(cat ${INSTALL_DIR}/bark_url)|" "${ENV_FILE}"
@@ -326,7 +334,6 @@ do_set_bark() {
   echo "当前 Bark URL: ${current_bark}"
   echo -e "格式示例: ${CYAN}https://api.day.app/你的token${RESET}"
   read -rp "新 Bark URL [回车删除配置]: " NEW_BARK
-  # 写入持久化文件
   mkdir -p "${INSTALL_DIR}"
   echo "${NEW_BARK}" > "${INSTALL_DIR}/bark_url"
   if grep -q '^BARK_URL=' "${ENV_FILE}" 2>/dev/null; then
