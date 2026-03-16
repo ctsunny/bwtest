@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -204,7 +205,8 @@ func main() {
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
-	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
+	// /api/data requires basic auth
+	mux.Handle("/api/data", basicAuth(cfg, http.HandlerFunc(jsonHandler(handleAPIData(db)))))
 
 	p := cfg.PanelPath
 	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
@@ -215,6 +217,7 @@ func main() {
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
+	mux.Handle(p+"/restart", basicAuth(cfg, http.HandlerFunc(handleRestart(p))))
 
 	if p != "/admin" {
 		mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
@@ -604,18 +607,20 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			CurrentTask string `json:"current_task"`
 		}
 		type taskJSON struct {
-			ID          string  `json:"id"`
-			ClientID    string  `json:"client_id"`
-			ClientName  string  `json:"client_name"`
-			Mode        string  `json:"mode"`
-			UpMbps      int     `json:"up_mbps"`
-			DownMbps    int     `json:"down_mbps"`
-			DurationSec int     `json:"duration_sec"`
-			Status      string  `json:"status"`
-			StartedAt   string  `json:"started_at"`
-			FinishedAt  string  `json:"finished_at"`
-			UploadGB    float64 `json:"upload_gb"`
-			DownloadGB  float64 `json:"download_gb"`
+			ID            string  `json:"id"`
+			ClientID      string  `json:"client_id"`
+			ClientName    string  `json:"client_name"`
+			Mode          string  `json:"mode"`
+			UpMbps        int     `json:"up_mbps"`
+			DownMbps      int     `json:"down_mbps"`
+			DurationSec   int     `json:"duration_sec"`
+			Status        string  `json:"status"`
+			StartedAt     string  `json:"started_at"`
+			FinishedAt    string  `json:"finished_at"`
+			UploadGB      float64 `json:"upload_gb"`
+			DownloadGB    float64 `json:"download_gb"`
+			UploadBytes   int64   `json:"upload_bytes"`
+			DownloadBytes int64   `json:"download_bytes"`
 		}
 		clientNames := map[string]string{}
 		for _, c := range clients {
@@ -637,8 +642,10 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
 				DurationSec: t.DurationSec, Status: t.Status,
 				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
-				UploadGB:   float64(t.UploadBytes) / (1024 * 1024 * 1024),
-				DownloadGB: float64(t.DownloadBytes) / (1024 * 1024 * 1024),
+				UploadGB:      float64(t.UploadBytes) / (1024 * 1024 * 1024),
+				DownloadGB:    float64(t.DownloadBytes) / (1024 * 1024 * 1024),
+				UploadBytes:   t.UploadBytes,
+				DownloadBytes: t.DownloadBytes,
 			})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"clients": cj, "tasks": tj})
@@ -657,6 +664,48 @@ func durationToSec(val int, unit string) int {
 		return val * 86400 * 30
 	default:
 		return val
+	}
+}
+
+func fmtDuration(sec int) string {
+	if sec < 60 {
+		return fmt.Sprintf("%d秒", sec)
+	} else if sec < 3600 {
+		m := sec / 60
+		s := sec % 60
+		if s == 0 {
+			return fmt.Sprintf("%d分", m)
+		}
+		return fmt.Sprintf("%d分%d秒", m, s)
+	} else if sec < 86400 {
+		h := sec / 3600
+		m := (sec % 3600) / 60
+		if m == 0 {
+			return fmt.Sprintf("%d时", h)
+		}
+		return fmt.Sprintf("%d时%d分", h, m)
+	}
+	d := sec / 86400
+	h := (sec % 86400) / 3600
+	if h == 0 {
+		return fmt.Sprintf("%d天", d)
+	}
+	return fmt.Sprintf("%d天%d时", d, h)
+}
+
+func handleRestart(panelPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		// 异步执行重启，让当前请求能正常返回
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			_ = exec.Command("systemctl", "restart", "bwpanel-server").Run()
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "msg": "重启指令已发出，服务将在1秒内重启"})
 	}
 }
 
@@ -728,6 +777,7 @@ button,.btn{border:none;border-radius:9px;padding:9px 14px;background:var(--prim
 button:hover,.btn:hover{background:var(--ph)}
 button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
 button.danger{background:#ef4444;color:#fff}button.danger:hover{background:#dc2626}
+button.warn{background:#f59e0b;color:#fff}button.warn:hover{background:#d97706}
 button.info{background:#0891b2;color:#fff}button.info:hover{background:#0e7490}
 form.inline{display:inline}
 .tbl{overflow:auto}
@@ -748,8 +798,10 @@ textarea{resize:vertical;min-height:60px}
 .copy-box{display:flex;gap:8px;align-items:center;margin-top:10px}
 .copy-box input{font-family:monospace;font-size:12px;background:#f9fafb}
 .gen-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
-#upgradeModal .modal-inner{background:#fff;border-radius:14px;padding:22px;width:min(600px,95vw)}
-#upgradeModal input{font-family:monospace;font-size:12px;background:#f9fafb}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal-inner{background:#fff;border-radius:14px;padding:22px;width:min(600px,95vw)}
+.modal-inner input{font-family:monospace;font-size:12px;background:#f9fafb}
 @media(max-width:960px){.grid{grid-template-columns:1fr 1fr}.gen-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:640px){body{padding:10px}.grid,.gen-grid{grid-template-columns:1fr}h1{font-size:26px}}
 </style>
@@ -763,11 +815,13 @@ textarea{resize:vertical;min-height:60px}
   <div class="toolbar">
     <button type="button" onclick="location.reload()">手动刷新</button>
     <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
+    <button type="button" class="warn" onclick="restartServer()">🔄 重启服务</button>
     <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
   </div>
 </div>
 
-<div id="upgradeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
+<!-- 升级命令弹窗 -->
+<div id="upgradeModal" class="modal-overlay">
   <div class="modal-inner">
     <h2>📦 客户端升级命令</h2>
     <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">在对应客户端 VPS 上以 root 运行此命令，配置文件将自动保留。</p>
@@ -781,8 +835,9 @@ textarea{resize:vertical;min-height:60px}
   </div>
 </div>
 
-<div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
-  <div class="card" style="width:min(480px,95vw);margin:0">
+<!-- 编辑客户端弹窗 -->
+<div id="editModal" class="modal-overlay">
+  <div class="modal-inner" style="width:min(480px,95vw)">
     <h2>编辑客户端</h2>
     <form method="post" action="{{.PanelPath}}/client/edit">
       <input type="hidden" id="editID" name="client_id">
@@ -826,7 +881,7 @@ textarea{resize:vertical;min-height:60px}
         </form>
         {{end}}
         <button type="button" class="sec" onclick="openEdit('{{.ID}}','{{.Name}}','{{.Remark}}')">编辑</button>
-        <button type="button" class="info" onclick="showUpgrade('{{.Name}}','{{.ID}}')" title="获取此客户端的升级/重装命令">升级命令</button>
+        <button type="button" class="info" onclick="showUpgrade('{{.Name}}','{{.ID}}')">升级命令</button>
         </div>
       </td>
     </tr>
@@ -912,6 +967,7 @@ textarea{resize:vertical;min-height:60px}
   <div class="tip" id="cmdTip"></div>
 </div>
 
+<!-- 正在运行的任务 -->
 <div class="card">
   <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
@@ -919,7 +975,7 @@ textarea{resize:vertical;min-height:60px}
     <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
     <tbody id="runningTaskBody">
     {{range .RunningTasks}}
-    <tr data-task-id="{{.ID}}">
+    <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
       <td>{{index $.ClientNames .ClientID}}</td>
       <td>{{.Mode}}</td>
       <td>{{.UpMbps}}</td>
@@ -939,12 +995,13 @@ textarea{resize:vertical;min-height:60px}
       </td>
     </tr>
     {{end}}
-    {{if (not .RunningTasks)}}<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
+    {{if (not .RunningTasks)}}<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
 </div>
 
+<!-- 历史任务 -->
 <div class="card">
   <h2>📋 历史任务</h2>
   <div class="tbl">
@@ -959,8 +1016,8 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.DownMbps}}</td>
       <td>{{.DurationSec}} 秒</td>
       <td><span class="badge {{.Status}}">{{.Status}}</span></td>
-      <td class="up-col">{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
-      <td class="down-col">{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
+      <td>{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
+      <td>{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
       <td>{{.StartedAt}}</td>
       <td>{{.FinishedAt}}</td>
       <td>
@@ -971,7 +1028,7 @@ textarea{resize:vertical;min-height:60px}
       </td>
     </tr>
     {{end}}
-    {{if (not .HistoryTasks)}}<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
+    {{if (not .HistoryTasks)}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
@@ -985,9 +1042,15 @@ const INIT_TOKEN  = "{{.InitToken}}";
 const PANEL_ADDR  = location.host;
 const VERSION     = "{{.Version}}";
 
-function fmtGB(gb) {
-  if (gb < 0.001) return '0.000 GB';
-  return gb.toFixed(3) + ' GB';
+// 客户端名称映射（从初始渲染提取）
+const clientNameMap = {};
+document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
+  clientNameMap[row.dataset.clientId] = row.dataset.name || row.dataset.clientId;
+});
+
+function fmtGB(bytes) {
+  if (!bytes || bytes === 0) return '0.000 GB';
+  return (bytes / 1073741824).toFixed(3) + ' GB';
 }
 function calcPing(lastSeen) {
   if (!lastSeen) return null;
@@ -1003,10 +1066,9 @@ function renderPing(sec) {
 }
 function tickPing() {
   document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
-    const lastSeen = row.dataset.lastSeen;
     const cell = row.querySelector('.ping-col');
     if (!cell) return;
-    const sec = calcPing(lastSeen);
+    const sec = calcPing(row.dataset.lastSeen);
     const r = renderPing(sec);
     cell.textContent = r.text;
     cell.className = 'ping-col ' + r.cls;
@@ -1015,30 +1077,119 @@ function tickPing() {
 setInterval(tickPing, 1000);
 tickPing();
 
+// 记录上次已知的任务状态，用于检测变化
+const knownTaskStatus = {};
+
+function buildRunningRow(t) {
+  const name = clientNameMap[t.client_id] || t.client_name || t.client_id;
+  const stopBtn = t.status === 'running'
+    ? `<form class="inline" method="post" action="${PANEL_PATH}/task/stop"><input type="hidden" name="task_id" value="${t.id}"><button type="submit" class="danger">停止</button></form>`
+    : '<span class="note">-</span>';
+  return `<tr data-task-id="${t.id}" data-status="${t.status}">
+    <td>${name}</td><td>${t.mode}</td><td>${t.up_mbps}</td><td>${t.down_mbps}</td>
+    <td>${t.duration_sec} 秒</td>
+    <td><span class="badge ${t.status}">${t.status}</span></td>
+    <td class="up-col">${fmtGB(t.upload_bytes)}</td>
+    <td class="down-col">${fmtGB(t.download_bytes)}</td>
+    <td>${t.started_at}</td>
+    <td>${stopBtn}</td>
+  </tr>`;
+}
+
+function buildHistoryRow(t) {
+  const name = clientNameMap[t.client_id] || t.client_name || t.client_id;
+  return `<tr data-task-id="${t.id}">
+    <td>${name}</td><td>${t.mode}</td><td>${t.up_mbps}</td><td>${t.down_mbps}</td>
+    <td>${t.duration_sec} 秒</td>
+    <td><span class="badge ${t.status}">${t.status}</span></td>
+    <td>${fmtGB(t.upload_bytes)}</td>
+    <td>${fmtGB(t.download_bytes)}</td>
+    <td>${t.started_at}</td>
+    <td>${t.finished_at}</td>
+    <td><form class="inline" method="post" action="${PANEL_PATH}/task/delete" onsubmit="return confirm('确认删除此任务记录？')"><input type="hidden" name="task_id" value="${t.id}"><button type="submit" class="danger">删除</button></form></td>
+  </tr>`;
+}
+
 function pollData() {
-  fetch('/api/data')
+  fetch('/api/data', {headers: {'Authorization': 'Basic ' + btoa(location.host)}})
     .then(r => r.json())
     .then(data => {
       const tasks = data.tasks || [];
+      const runningStatuses = ['running', 'pending', 'stopping'];
+
+      const runningTasks = tasks.filter(t => runningStatuses.includes(t.status));
+      const historyTasks = tasks.filter(t => !runningStatuses.includes(t.status));
+
+      let needFullRefresh = false;
+
+      // 检查是否有任务状态变化（running <-> done/stopped）
       tasks.forEach(t => {
-        const row = document.querySelector('[data-task-id="' + t.id + '"]');
-        if (!row) return;
-        const upCol = row.querySelector('.up-col');
-        const dnCol = row.querySelector('.down-col');
-        if (upCol) upCol.textContent = fmtGB(t.upload_gb);
-        if (dnCol) dnCol.textContent = fmtGB(t.download_gb);
-        const badge = row.querySelector('.badge');
-        if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
+        const prev = knownTaskStatus[t.id];
+        if (prev !== undefined && prev !== t.status) {
+          // 状态发生变化
+          if (runningStatuses.includes(prev) !== runningStatuses.includes(t.status)) {
+            needFullRefresh = true;
+          }
+        }
+        knownTaskStatus[t.id] = t.status;
       });
+
+      // 检查是否有新任务出现在运行列表但页面没有对应行
+      runningTasks.forEach(t => {
+        if (!document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`)) {
+          needFullRefresh = true;
+        }
+      });
+      historyTasks.forEach(t => {
+        if (!document.querySelector(`#historyTaskBody [data-task-id="${t.id}"]`)) {
+          needFullRefresh = true;
+        }
+      });
+
+      if (needFullRefresh) {
+        // 全量重渲染两个表格
+        const rb = document.getElementById('runningTaskBody');
+        if (rb) {
+          if (runningTasks.length === 0) {
+            rb.innerHTML = '<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>';
+          } else {
+            rb.innerHTML = runningTasks.map(buildRunningRow).join('');
+          }
+        }
+        const hb = document.getElementById('historyTaskBody');
+        if (hb) {
+          if (historyTasks.length === 0) {
+            hb.innerHTML = '<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>';
+          } else {
+            hb.innerHTML = historyTasks.map(buildHistoryRow).join('');
+          }
+        }
+      } else {
+        // 只更新进度数据
+        runningTasks.forEach(t => {
+          const row = document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`);
+          if (!row) return;
+          const upCol = row.querySelector('.up-col');
+          const dnCol = row.querySelector('.down-col');
+          if (upCol) upCol.textContent = fmtGB(t.upload_bytes);
+          if (dnCol) dnCol.textContent = fmtGB(t.download_bytes);
+          const badge = row.querySelector('.badge');
+          if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
+        });
+      }
+
+      // 更新客户端心跳和当前任务
       const clients = data.clients || [];
       clients.forEach(c => {
-        const row = document.querySelector('[data-client-id="' + c.id + '"]');
+        const row = document.querySelector(`#clientBody [data-client-id="${c.id}"]`);
         if (!row) return;
         if (c.last_seen) row.dataset.lastSeen = c.last_seen;
         const ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
+        if (c.name) clientNameMap[c.id] = c.name;
       });
       tickPing();
+
       const hint = document.getElementById('taskRefreshHint');
       if (hint) hint.textContent = '(上次刷新: ' + new Date().toLocaleTimeString() + ')';
     })
@@ -1051,7 +1202,8 @@ const es = new EventSource(PANEL_PATH + '/events');
 const liveStatus = document.getElementById('liveStatus');
 es.onmessage = e => {
   if (e.data !== 'ping' && e.data !== 'ready') {
-    if (liveStatus) liveStatus.textContent = '检测到状态变化，数据将在下次轮询时自动更新。';
+    pollData();
+    if (liveStatus) liveStatus.textContent = '检测到状态变化，已立即刷新。';
   }
 };
 es.onerror = () => {
@@ -1062,25 +1214,26 @@ function openEdit(id, name, remark) {
   document.getElementById('editID').value = id;
   document.getElementById('editName').value = name;
   document.getElementById('editRemark').value = remark;
-  document.getElementById('editModal').style.display = 'flex';
+  document.getElementById('editModal').classList.add('open');
 }
 function closeEdit() {
-  document.getElementById('editModal').style.display = 'none';
+  document.getElementById('editModal').classList.remove('open');
 }
+
 function showUpgrade(clientName, clientId) {
   const panelUrl = location.protocol + '//' + PANEL_ADDR;
   const ver = VERSION || 'latest';
-  const cmd = 'curl --proto \'=https\' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh'
+  const cmd = "curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
     + ' | bash -s -- '
     + ' --server-url ' + panelUrl
-    + ' --init-token \'' + INIT_TOKEN + '\''
-    + ' --client-name \'' + clientName + '\''
+    + " --init-token '" + INIT_TOKEN + "'"
+    + " --client-name '" + clientName + "'"
     + ' --version ' + ver;
   document.getElementById('upgradeCmd').value = cmd;
-  document.getElementById('upgradeModal').style.display = 'flex';
+  document.getElementById('upgradeModal').classList.add('open');
 }
 function closeUpgrade() {
-  document.getElementById('upgradeModal').style.display = 'none';
+  document.getElementById('upgradeModal').classList.remove('open');
 }
 function copyUpgrade() {
   const el = document.getElementById('upgradeCmd');
@@ -1088,18 +1241,19 @@ function copyUpgrade() {
   document.execCommand('copy');
   alert('已复制到剪贴板');
 }
+
 function genCmd() {
   const name    = document.getElementById('genName').value.trim();
   const remark  = document.getElementById('genRemark').value.trim();
   const version = document.getElementById('genVersion').value.trim() || 'latest';
   if (!name) { alert('请填写客户端名称'); return; }
   const panelUrl = location.protocol + '//' + PANEL_ADDR;
-  let cmd = 'curl --proto \'=https\' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --'
+  let cmd = "curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --"
     + ' --server-url ' + panelUrl
-    + ' --init-token \'' + INIT_TOKEN + '\''
-    + ' --client-name \'' + name + '\''
+    + " --init-token '" + INIT_TOKEN + "'"
+    + " --client-name '" + name + "'"
     + ' --version ' + version;
-  if (remark) cmd += ' --remark \'' + remark + '\'';
+  if (remark) cmd += " --remark '" + remark + "'";
   document.getElementById('cmdText').value = cmd;
   document.getElementById('cmdBox').style.display = 'flex';
   document.getElementById('cmdTip').textContent = '将此命令复制到客户端 VPS 上执行即可完成安装与注册。';
@@ -1109,6 +1263,19 @@ function copyCmd() {
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
+}
+
+function restartServer() {
+  if (!confirm('确认重启服务端？重启过程约1秒，期间面板短暂不可访问。')) return;
+  fetch(PANEL_PATH + '/restart', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'}
+  }).then(() => {
+    alert('重启指令已发出，3秒后自动刷新页面。');
+    setTimeout(() => location.reload(), 3000);
+  }).catch(() => {
+    setTimeout(() => location.reload(), 3000);
+  });
 }
 </script>
 </body>
