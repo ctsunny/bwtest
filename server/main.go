@@ -184,7 +184,6 @@ func main() {
 	if cfg.PanelPath == "" {
 		cfg.PanelPath = "/admin"
 	}
-	// 优先从持久化文件读取 BarkURL（Settings 页保存的值）
 	if saved := loadBarkURL("/opt/bwtest/bark_url"); saved != "" {
 		cfg.BarkURL = saved
 	}
@@ -768,7 +767,6 @@ textarea{resize:vertical;min-height:60px}
   </div>
 </div>
 
-<!-- 升级命令弹窗 -->
 <div id="upgradeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
   <div class="modal-inner">
     <h2>📦 客户端升级命令</h2>
@@ -783,7 +781,6 @@ textarea{resize:vertical;min-height:60px}
   </div>
 </div>
 
-<!-- 编辑客户端弹窗 -->
 <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
   <div class="card" style="width:min(480px,95vw);margin:0">
     <h2>编辑客户端</h2>
@@ -822,7 +819,7 @@ textarea{resize:vertical;min-height:60px}
       <td class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
       <td>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-        {{if not .Approved}}
+        {{if (not .Approved)}}
         <form class="inline" method="post" action="{{$.PanelPath}}/approve">
           <input type="hidden" name="client_id" value="{{.ID}}">
           <button type="submit">批准</button>
@@ -915,7 +912,6 @@ textarea{resize:vertical;min-height:60px}
   <div class="tip" id="cmdTip"></div>
 </div>
 
-<!-- 正在运行的任务 -->
 <div class="card">
   <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
@@ -943,13 +939,12 @@ textarea{resize:vertical;min-height:60px}
       </td>
     </tr>
     {{end}}
-    {{if not .RunningTasks}}<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
+    {{if (not .RunningTasks)}}<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
 </div>
 
-<!-- 历史任务 -->
 <div class="card">
   <h2>📋 历史任务</h2>
   <div class="tbl">
@@ -976,7 +971,7 @@ textarea{resize:vertical;min-height:60px}
       </td>
     </tr>
     {{end}}
-    {{if not .HistoryTasks}}<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
+    {{if (not .HistoryTasks)}}<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
@@ -994,21 +989,18 @@ function fmtGB(gb) {
   if (gb < 0.001) return '0.000 GB';
   return gb.toFixed(3) + ' GB';
 }
-
 function calcPing(lastSeen) {
   if (!lastSeen) return null;
   const t = new Date(lastSeen);
   if (isNaN(t)) return null;
   return Math.floor((Date.now() - t.getTime()) / 1000);
 }
-
 function renderPing(sec) {
   if (sec === null) return { text: '?', cls: 'ping-warn' };
   if (sec < 30)  return { text: sec + 's', cls: 'ping-ok' };
   if (sec < 60)  return { text: sec + 's', cls: 'ping-warn' };
   return { text: sec + 's ⚠', cls: 'ping-dead' };
 }
-
 function tickPing() {
   document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
     const lastSeen = row.dataset.lastSeen;
@@ -1075,7 +1067,6 @@ function openEdit(id, name, remark) {
 function closeEdit() {
   document.getElementById('editModal').style.display = 'none';
 }
-
 function showUpgrade(clientName, clientId) {
   const panelUrl = location.protocol + '//' + PANEL_ADDR;
   const ver = VERSION || 'latest';
@@ -1097,7 +1088,6 @@ function copyUpgrade() {
   document.execCommand('copy');
   alert('已复制到剪贴板');
 }
-
 function genCmd() {
   const name    = document.getElementById('genName').value.trim();
   const remark  = document.getElementById('genRemark').value.trim();
@@ -1156,7 +1146,6 @@ func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.Handler
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		taskID := r.Form.Get("task_id")
-		// 只允许删除非 running 任务
 		_, _ = db.Exec(`DELETE FROM tasks WHERE id=? AND status NOT IN ('running','stopping')`, taskID)
 		broker.Publish("tasks")
 		http.Redirect(w, r, panelPath, http.StatusFound)
@@ -1186,9 +1175,9 @@ a{color:#2563eb}label{font-size:13px;color:#6b7280}</style></head>
 <p style="font-size:13px;color:#6b7280;margin-bottom:16px">填入 Bark URL（格式：<code>https://api.day.app/你的token</code>），留空则关闭推送。</p>
 <form method="post">
 <label>Bark URL</label><br>
-<input name="bark_url" value="%s" placeholder="https://api.day.app/xxxxxx" style="margin-top:6px">
+<input name="bark_url" value="%%s" placeholder="https://api.day.app/xxxxxx" style="margin-top:6px">
 <br><button type="submit">保存</button>
-<a href="%s" style="margin-left:12px;font-size:13px">← 返回</a>
+<a href="%%s" style="margin-left:12px;font-size:13px">← 返回</a>
 </form>
 <p style="font-size:12px;color:#9ca3af;margin-top:20px">保存后立即生效，无需重启服务端。配置持久化到 /opt/bwtest/bark_url 文件。</p>
 </body></html>`, cfg.BarkURL, panelPath)
