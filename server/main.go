@@ -31,11 +31,13 @@ type Config struct {
 	AdminUser  string
 	AdminPass  string
 	DBPath     string
+	PanelPath  string // e.g. /console-8f29c4a1
 }
 
 type Client struct {
 	ID          string
 	Name        string
+	Remark      string
 	Approved    bool
 	LastSeen    string
 	RemoteIP    string
@@ -143,12 +145,16 @@ func main() {
 		AdminUser:  getenv("ADMIN_USER", "admin"),
 		AdminPass:  getenv("ADMIN_PASS", "admin123456"),
 		DBPath:     getenv("DB_PATH", "/opt/bwtest/bwtest.db"),
+		PanelPath:  strings.TrimRight(getenv("PANEL_PATH", "/admin"), "/"),
+	}
+	if cfg.PanelPath == "" {
+		cfg.PanelPath = "/admin"
 	}
 
 	db := mustInitDB(cfg.DBPath)
 	broker := NewBroker()
 
-	log.Printf("panel=%s data=%s db=%s", cfg.PanelAddr, cfg.DataAddr, cfg.DBPath)
+	log.Printf("panel=%s%s data=%s db=%s", cfg.PanelAddr, cfg.PanelPath, cfg.DataAddr, cfg.DBPath)
 
 	go runDataServer(cfg, db)
 
@@ -159,11 +165,20 @@ func main() {
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 
-	mux.Handle("/admin", basicAuth(cfg, http.HandlerFunc(handleAdmin(db))))
-	mux.Handle("/admin/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(db, broker))))
-	mux.Handle("/admin/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(db, broker))))
-	mux.Handle("/admin/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(db, broker))))
-	mux.Handle("/admin/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
+	p := cfg.PanelPath
+	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
+	mux.Handle(p+"/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(p, db, broker))))
+	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
+	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, db, broker))))
+	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
+	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
+
+	// legacy /admin redirect if path changed
+	if p != "/admin" {
+		mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, p, http.StatusFound)
+		})
+	}
 
 	log.Fatal(http.ListenAndServe(cfg.PanelAddr, mux))
 }
@@ -182,12 +197,15 @@ func mustInitDB(path string) *sql.DB {
 		`CREATE TABLE IF NOT EXISTS clients(
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
+			remark TEXT NOT NULL DEFAULT '',
 			token TEXT NOT NULL,
 			approved INTEGER NOT NULL DEFAULT 0,
 			last_seen TEXT NOT NULL,
 			remote_ip TEXT NOT NULL DEFAULT '',
 			current_task TEXT NOT NULL DEFAULT ''
 		);`,
+		// migrate: add remark if missing
+		`ALTER TABLE clients ADD COLUMN remark TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
@@ -206,7 +224,10 @@ func mustInitDB(path string) *sql.DB {
 
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
-			log.Fatal(err)
+			// ignore "duplicate column" for ALTER TABLE
+			if !strings.Contains(err.Error(), "duplicate column") {
+				log.Printf("db init warn: %v", err)
+			}
 		}
 	}
 
@@ -341,9 +362,9 @@ func handleRegister(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 				return
 			}
 			_, err = db.Exec(`
-				INSERT INTO clients(id,name,token,approved,last_seen,remote_ip,current_task)
-				VALUES(?,?,?,?,?,?,?)`,
-				req.ClientID, req.Name, req.ClientToken, 0, now, realIP(r), "")
+				INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task)
+				VALUES(?,?,?,?,?,?,?,?)`,
+				req.ClientID, req.Name, "", req.ClientToken, 0, now, realIP(r), "")
 			if err != nil {
 				http.Error(w, err.Error(), 500)
 				return
@@ -507,117 +528,330 @@ func handleTaskControl(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleAdmin(db *sql.DB) http.HandlerFunc {
+// durationToSec converts value+unit to seconds
+func durationToSec(val int, unit string) int {
+	switch unit {
+	case "min":
+		return val * 60
+	case "hour":
+		return val * 3600
+	case "day":
+		return val * 86400
+	case "month":
+		return val * 86400 * 30
+	default: // sec
+		return val
+	}
+}
+
+func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clients := mustClients(db)
 		tasks := mustTasks(db)
 
-		const page = `
-<!doctype html>
-<html>
+		type pageData struct {
+			Clients       []Client
+			Tasks         []Task
+			ApprovedIDs   []string
+			DefaultClient string
+			PanelPath     string
+			ServerHost    string
+			InitToken     string
+			Version       string
+		}
+
+		var approvedIDs []string
+		defaultClient := ""
+		for _, c := range clients {
+			if c.Approved {
+				approvedIDs = append(approvedIDs, c.ID)
+				if defaultClient == "" {
+					defaultClient = c.ID
+				}
+			}
+		}
+
+		version := getenv("BWPANEL_VERSION", "latest")
+
+		const page = `<!doctype html>
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>BW Panel</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>带宽测试面板</title>
 <style>
-body{font-family:Arial,sans-serif;margin:20px;background:#f7f7f9;color:#222}
-h2{margin-top:28px}
-.card{background:#fff;border:1px solid #ddd;border-radius:10px;padding:14px;margin-bottom:16px}
-table{border-collapse:collapse;width:100%;background:#fff}
-th,td{border:1px solid #e5e5e5;padding:8px;font-size:14px}
-input,select,button{padding:8px;margin:4px}
-.badge{padding:2px 8px;border-radius:12px;font-size:12px}
-.ok{background:#d4f7d9}
-.no{background:#ffd9d9}
-.running{background:#d9ecff}
-.done{background:#e8f5e9}
-.stopped{background:#fff0c9}
-.pending{background:#f0f0f0}
-.stopping{background:#ffe5cc}
+:root{--bg:#f5f7fb;--card:#fff;--border:#e5e7eb;--text:#111827;--muted:#6b7280;--primary:#2563eb;--ph:#1d4ed8;--ok-bg:#dcfce7;--ok:#166534;--no-bg:#fee2e2;--no:#991b1b;--run-bg:#dbeafe;--run:#1d4ed8;--done-bg:#dcfce7;--done:#166534;--pend-bg:#f3f4f6;--pend:#374151;--warn-bg:#fef3c7;--warn:#92400e;--stop-bg:#ffedd5;--stop:#9a3412}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+.wrap{max-width:1280px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+h1{margin:0 0 6px;font-size:36px}h2{margin:0 0 14px;font-size:20px}p{margin:0;color:var(--muted);font-size:14px}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+.note{font-size:13px;color:var(--muted)}
+#liveStatus{font-size:13px;color:var(--muted)}
+btn,button,.btn{border:none;border-radius:9px;padding:9px 14px;background:var(--primary);color:#fff;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;white-space:nowrap}
+button:hover,.btn:hover{background:var(--ph)}
+button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
+button.danger{background:#ef4444;color:#fff}button.danger:hover{background:#dc2626}
+form.inline{display:inline}
+.tbl{overflow:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;font-size:13px}
+th{background:#f9fafb;font-weight:700}
+.badge{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700}
+.ok{background:var(--ok-bg);color:var(--ok)}.no{background:var(--no-bg);color:var(--no)}
+.running{background:var(--run-bg);color:var(--run)}.done{background:var(--done-bg);color:var(--done)}
+.pending{background:var(--pend-bg);color:var(--pend)}.stopped{background:var(--warn-bg);color:var(--warn)}
+.stopping{background:var(--stop-bg);color:var(--stop)}
+.grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
+.dur-wrap{display:flex;gap:6px}
+.dur-wrap input{flex:1}
+.dur-wrap select{width:90px}
+input,select,textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:9px;font-size:13px;background:#fff}
+textarea{resize:vertical;min-height:60px}
+.tip{margin-top:10px;font-size:12px;color:var(--muted)}
+.copy-box{display:flex;gap:8px;align-items:center;margin-top:10px}
+.copy-box input{font-family:monospace;font-size:12px;background:#f9fafb}
+.gen-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
+@media(max-width:960px){.grid{grid-template-columns:1fr 1fr}.gen-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:640px){body{padding:10px}.grid,.gen-grid{grid-template-columns:1fr}h1{font-size:26px}}
 </style>
 </head>
 <body>
+<div class="wrap">
+
 <div class="card">
-<h1>BW Panel</h1>
-<p>Client management, task control and live status.</p>
+  <h1>带宽测试面板</h1>
+  <p>客户端管理、任务下发和实时状态查看。</p>
+  <div class="toolbar">
+    <button type="button" onclick="location.reload()">手动刷新</button>
+    <span id="liveStatus" class="note">实时消息已连接，收到更新时提示，不自动整页刷新。</span>
+  </div>
 </div>
 
-<h2>Clients</h2>
-<table>
-<tr><th>ID</th><th>Name</th><th>Approved</th><th>Last Seen</th><th>Remote IP</th><th>Current Task</th><th>Action</th></tr>
-{{range .Clients}}
-<tr>
-<td>{{.ID}}</td>
-<td>{{.Name}}</td>
-<td>{{if .Approved}}<span class="badge ok">yes</span>{{else}}<span class="badge no">no</span>{{end}}</td>
-<td>{{.LastSeen}}</td>
-<td>{{.RemoteIP}}</td>
-<td>{{.CurrentTask}}</td>
-<td>
-{{if not .Approved}}
-<form method="post" action="/admin/approve">
-<input type="hidden" name="client_id" value="{{.ID}}">
-<button type="submit">Approve</button>
-</form>
-{{end}}
-</td>
-</tr>
-{{end}}
-</table>
-
-<h2>Create Task</h2>
 <div class="card">
-<form method="post" action="/admin/task/create">
-<input name="client_id" placeholder="client_id" required>
-<select name="mode">
-<option value="upload">upload</option>
-<option value="download">download</option>
-<option value="both">both</option>
-</select>
-<input name="up_mbps" placeholder="up_mbps" value="10">
-<input name="down_mbps" placeholder="down_mbps" value="10">
-<input name="duration_sec" placeholder="duration_sec" value="60">
-<button type="submit">Create Task</button>
-</form>
+  <h2>客户端列表</h2>
+  <div class="tbl">
+  <table>
+    <tr><th>ID</th><th>名称</th><th>备注</th><th>已批准</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr>
+    {{range .Clients}}
+    <tr>
+      <td style="font-family:monospace;font-size:12px">{{.ID}}</td>
+      <td>{{.Name}}</td>
+      <td>{{.Remark}}</td>
+      <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
+      <td>{{.LastSeen}}</td>
+      <td>{{.RemoteIP}}</td>
+      <td style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
+      <td>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        {{if not .Approved}}
+        <form class="inline" method="post" action="{{$.PanelPath}}/approve">
+          <input type="hidden" name="client_id" value="{{.ID}}">
+          <button type="submit">批准</button>
+        </form>
+        {{end}}
+        <button type="button" class="sec" onclick="openEdit('{{.ID}}','{{.Name}}','{{.Remark}}')">编辑</button>
+        </div>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  </div>
+  <div class="tip">创建任务前请确认客户端已批准。</div>
 </div>
 
-<h2>Tasks</h2>
-<table>
-<tr><th>ID</th><th>Client</th><th>Mode</th><th>Up Mbps</th><th>Down Mbps</th><th>Duration</th><th>Status</th><th>Upload Bytes</th><th>Download Bytes</th><th>Started</th><th>Finished</th><th>Action</th></tr>
-{{range .Tasks}}
-<tr>
-<td>{{.ID}}</td>
-<td>{{.ClientID}}</td>
-<td>{{.Mode}}</td>
-<td>{{.UpMbps}}</td>
-<td>{{.DownMbps}}</td>
-<td>{{.DurationSec}} s</td>
-<td><span class="badge {{.Status}}">{{.Status}}</span></td>
-<td>{{.UploadBytes}}</td>
-<td>{{.DownloadBytes}}</td>
-<td>{{.StartedAt}}</td>
-<td>{{.FinishedAt}}</td>
-<td>
-{{if eq .Status "running"}}
-<form method="post" action="/admin/task/stop">
-<input type="hidden" name="task_id" value="{{.ID}}">
-<button type="submit">Stop</button>
-</form>
-{{end}}
-</td>
-</tr>
-{{end}}
-</table>
+<!-- 编辑客户端弹窗 -->
+<div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
+  <div class="card" style="width:min(480px,95vw);margin:0">
+    <h2>编辑客户端</h2>
+    <form method="post" action="{{.PanelPath}}/client/edit">
+      <input type="hidden" id="editID" name="client_id">
+      <div style="margin-bottom:10px">
+        <label style="font-size:13px;color:var(--muted)">名称</label>
+        <input id="editName" name="name" placeholder="名称" style="margin-top:4px">
+      </div>
+      <div style="margin-bottom:14px">
+        <label style="font-size:13px;color:var(--muted)">备注</label>
+        <textarea id="editRemark" name="remark" placeholder="备注（可选）" style="margin-top:4px"></textarea>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button type="submit">保存</button>
+        <button type="button" class="sec" onclick="closeEdit()">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h2>创建任务</h2>
+  <form method="post" action="{{.PanelPath}}/task/create">
+    <div class="grid">
+      <div>
+        <label class="note">客户端 ID</label>
+        <input list="clientList" id="client_id" name="client_id" placeholder="客户端 ID" value="{{.DefaultClient}}" required style="margin-top:4px">
+        <datalist id="clientList">{{range .ApprovedIDs}}<option value="{{.}}">{{end}}</datalist>
+      </div>
+      <div>
+        <label class="note">模式</label>
+        <select name="mode" style="margin-top:4px">
+          <option value="upload">上传</option>
+          <option value="download">下载</option>
+          <option value="both">双向</option>
+        </select>
+      </div>
+      <div>
+        <label class="note">上传速度 Mbps</label>
+        <input name="up_mbps" value="10" style="margin-top:4px">
+      </div>
+      <div>
+        <label class="note">下载速度 Mbps</label>
+        <input name="down_mbps" value="10" style="margin-top:4px">
+      </div>
+      <div>
+        <label class="note">时长</label>
+        <div class="dur-wrap" style="margin-top:4px">
+          <input name="duration_val" value="1" type="number" min="1">
+          <select name="duration_unit">
+            <option value="sec">秒</option>
+            <option value="min" selected>分</option>
+            <option value="hour">时</option>
+            <option value="day">天</option>
+            <option value="month">月</option>
+          </select>
+        </div>
+      </div>
+      <div style="align-self:end">
+        <button type="submit" style="width:100%">创建任务</button>
+      </div>
+    </div>
+  </form>
+  <div class="tip">上传/下载速度单位为 Mbps；时长默认选"分"，1 分 = 60 秒。</div>
+</div>
+
+<div class="card">
+  <h2>生成客户端安装命令</h2>
+  <div class="gen-grid">
+    <div>
+      <label class="note">客户端名称</label>
+      <input id="genName" placeholder="例：香港-1号机" style="margin-top:4px">
+    </div>
+    <div>
+      <label class="note">备注（可选）</label>
+      <input id="genRemark" placeholder="可选备注" style="margin-top:4px">
+    </div>
+    <div>
+      <label class="note">版本号</label>
+      <input id="genVersion" value="{{.Version}}" style="margin-top:4px">
+    </div>
+    <div style="align-self:end">
+      <button type="button" onclick="genCmd()" style="width:100%">生成命令</button>
+    </div>
+  </div>
+  <div class="copy-box" id="cmdBox" style="display:none">
+    <input id="cmdText" readonly>
+    <button type="button" class="sec" onclick="copyCmd()">复制</button>
+  </div>
+  <div class="tip" id="cmdTip"></div>
+</div>
+
+<div class="card">
+  <h2>任务列表</h2>
+  <div class="tbl">
+  <table>
+    <tr><th>ID</th><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>上传字节</th><th>下载字节</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr>
+    {{range .Tasks}}
+    <tr>
+      <td style="font-family:monospace;font-size:11px">{{.ID}}</td>
+      <td style="font-family:monospace;font-size:11px">{{.ClientID}}</td>
+      <td>{{.Mode}}</td>
+      <td>{{.UpMbps}}</td>
+      <td>{{.DownMbps}}</td>
+      <td>{{.DurationSec}} 秒</td>
+      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td>{{.UploadBytes}}</td>
+      <td>{{.DownloadBytes}}</td>
+      <td>{{.StartedAt}}</td>
+      <td>{{.FinishedAt}}</td>
+      <td>
+        {{if eq .Status "running"}}
+        <form class="inline" method="post" action="{{$.PanelPath}}/task/stop">
+          <input type="hidden" name="task_id" value="{{.ID}}">
+          <button type="submit" class="danger">停止</button>
+        </form>
+        {{else}}<span class="note">-</span>{{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  </div>
+</div>
+
+</div><!-- wrap -->
 
 <script>
-const es = new EventSource('/admin/events');
-es.onmessage = function() { location.reload(); };
+const PANEL_PATH = "{{.PanelPath}}";
+const SERVER_HOST = "{{.ServerHost}}";
+const INIT_TOKEN  = "{{.InitToken}}";
+const PANEL_ADDR  = location.host;
+
+const es = new EventSource(PANEL_PATH + '/events');
+const liveStatus = document.getElementById('liveStatus');
+es.onmessage = function() {
+  if (liveStatus) liveStatus.textContent = '有新状态更新，点"手动刷新"查看最新内容。';
+};
+es.onerror = function() {
+  if (liveStatus) liveStatus.textContent = '实时消息流异常，可手动刷新。';
+};
+
+function openEdit(id, name, remark) {
+  document.getElementById('editID').value = id;
+  document.getElementById('editName').value = name;
+  document.getElementById('editRemark').value = remark;
+  document.getElementById('editModal').style.display = 'flex';
+}
+function closeEdit() {
+  document.getElementById('editModal').style.display = 'none';
+}
+
+function genCmd() {
+  const name    = document.getElementById('genName').value.trim();
+  const remark  = document.getElementById('genRemark').value.trim();
+  const version = document.getElementById('genVersion').value.trim() || 'latest';
+  if (!name) { alert('请填写客户端名称'); return; }
+  const panelUrl = location.protocol + '//' + PANEL_ADDR;
+  let cmd = 'curl --proto \'=https\' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --'
+    + ' --server-url ' + panelUrl
+    + ' --init-token \'' + INIT_TOKEN + '\''
+    + ' --client-name \'' + name + '\''
+    + ' --version ' + version;
+  if (remark) cmd += ' --remark \'' + remark + '\'';
+  document.getElementById('cmdText').value = cmd;
+  document.getElementById('cmdBox').style.display = 'flex';
+  document.getElementById('cmdTip').textContent = '将此命令复制到客户端 VPS 上执行即可完成安装与注册。';
+}
+function copyCmd() {
+  const el = document.getElementById('cmdText');
+  el.select();
+  document.execCommand('copy');
+  alert('已复制到剪贴板');
+}
 </script>
 </body>
 </html>`
-		tpl := template.Must(template.New("page").Parse(page))
-		_ = tpl.Execute(w, map[string]any{
-			"Clients": clients,
-			"Tasks":   tasks,
+
+		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
+			"not": func(b bool) bool { return !b },
+		}).Parse(page))
+		_ = tpl.Execute(w, pageData{
+			Clients:       clients,
+			Tasks:         tasks,
+			ApprovedIDs:   approvedIDs,
+			DefaultClient: defaultClient,
+			PanelPath:     cfg.PanelPath,
+			ServerHost:    cfg.ServerHost,
+			InitToken:     cfg.InitToken,
+			Version:       version,
 		})
 	}
 }
@@ -658,17 +892,31 @@ func handleEvents(b *Broker) http.HandlerFunc {
 	}
 }
 
-func handleApprove(db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleApprove(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		clientID := r.Form.Get("client_id")
 		_, _ = db.Exec(`UPDATE clients SET approved=1 WHERE id=?`, clientID)
 		broker.Publish("clients")
-		http.Redirect(w, r, "/admin", http.StatusFound)
+		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
 }
 
-func handleCreateTask(db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		clientID := r.Form.Get("client_id")
+		name := strings.TrimSpace(r.Form.Get("name"))
+		remark := strings.TrimSpace(r.Form.Get("remark"))
+		if name != "" {
+			_, _ = db.Exec(`UPDATE clients SET name=?, remark=? WHERE id=?`, name, remark, clientID)
+		}
+		broker.Publish("clients")
+		http.Redirect(w, r, panelPath, http.StatusFound)
+	}
+}
+
+func handleCreateTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 
@@ -676,7 +924,9 @@ func handleCreateTask(db *sql.DB, broker *Broker) http.HandlerFunc {
 		mode := r.Form.Get("mode")
 		up, _ := strconv.Atoi(r.Form.Get("up_mbps"))
 		down, _ := strconv.Atoi(r.Form.Get("down_mbps"))
-		dur, _ := strconv.Atoi(r.Form.Get("duration_sec"))
+		durVal, _ := strconv.Atoi(r.Form.Get("duration_val"))
+		durUnit := r.Form.Get("duration_unit")
+		dur := durationToSec(durVal, durUnit)
 		if dur <= 0 {
 			dur = 60
 		}
@@ -698,22 +948,22 @@ func handleCreateTask(db *sql.DB, broker *Broker) http.HandlerFunc {
 		}
 
 		broker.Publish("tasks")
-		http.Redirect(w, r, "/admin", http.StatusFound)
+		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
 }
 
-func handleStopTask(db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		taskID := r.Form.Get("task_id")
 		_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=? AND status='running'`, taskID)
 		broker.Publish("tasks")
-		http.Redirect(w, r, "/admin", http.StatusFound)
+		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
 }
 
 func mustClients(db *sql.DB) []Client {
-	rows, err := db.Query(`SELECT id,name,approved,last_seen,remote_ip,current_task FROM clients`)
+	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task FROM clients`)
 	if err != nil {
 		return nil
 	}
@@ -723,7 +973,7 @@ func mustClients(db *sql.DB) []Client {
 	for rows.Next() {
 		var c Client
 		var approved int
-		_ = rows.Scan(&c.ID, &c.Name, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask)
+		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask)
 		c.Approved = approved == 1
 		out = append(out, c)
 	}
