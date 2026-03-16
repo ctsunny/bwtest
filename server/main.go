@@ -170,6 +170,36 @@ func loadBarkURL(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// barkURLFromToken 把 token 拼接成完整 Bark URL
+func barkURLFromToken(token string) string {
+	token = strings.TrimSpace(token)
+	token = strings.Trim(token, "/")
+	if token == "" {
+		return ""
+	}
+	// 如果用户误填了完整 URL，直接原样返回
+	if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") {
+		return strings.TrimRight(token, "/")
+	}
+	return "https://api.day.app/" + token
+}
+
+// barkTokenFromURL 从完整 URL 提取 token
+func barkTokenFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, "/")
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "https://api.day.app/") {
+		return strings.TrimPrefix(raw, "https://api.day.app/")
+	}
+	if strings.HasPrefix(raw, "http://api.day.app/") {
+		return strings.TrimPrefix(raw, "http://api.day.app/")
+	}
+	return raw
+}
+
 func main() {
 	cfg := Config{
 		PanelAddr:  getenv("PANEL_ADDR", ":8080"),
@@ -218,6 +248,7 @@ func main() {
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 	mux.Handle(p+"/restart", basicAuth(cfg, http.HandlerFunc(handleRestart(p))))
+	mux.Handle(p+"/server", basicAuth(cfg, http.HandlerFunc(handleServerPage(p, &cfg))))
 
 	if p != "/admin" {
 		mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
@@ -728,7 +759,7 @@ func fmtDuration(sec int) string {
 func handleRestart(panelPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Redirect(w, r, panelPath, http.StatusFound)
+			http.Redirect(w, r, panelPath+"/server", http.StatusFound)
 			return
 		}
 		go func() {
@@ -737,6 +768,88 @@ func handleRestart(panelPath string) http.HandlerFunc {
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "msg": "重启指令已发出，服务将在1秒内重启"})
+	}
+}
+
+// handleServerPage 服务器 Linux 管理页（含重启按钮）
+func handleServerPage(panelPath string, cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		barkToken := barkTokenFromURL(cfg.BarkURL)
+		barkStatus := "未配置"
+		if cfg.BarkURL != "" {
+			barkStatus = "已配置 ✓"
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>服务器 Linux 管理</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  background:#f5f7fb;color:#111827;margin:0;padding:20px}
+.wrap{max-width:700px;margin:0 auto}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:22px;margin-bottom:18px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05)}
+h1{margin:0 0 6px;font-size:26px}h2{margin:0 0 14px;font-size:18px}
+.row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f3f4f6;font-size:14px}
+.row:last-child{border-bottom:none}
+.label{color:#6b7280}
+.val{font-family:monospace;font-size:13px;color:#111827;word-break:break-all;text-align:right;max-width:70%%}
+button,.btn{border:none;border-radius:9px;padding:10px 18px;background:#2563eb;color:#fff;cursor:pointer;
+  font-size:14px;text-decoration:none;display:inline-block}
+button:hover,.btn:hover{background:#1d4ed8}
+button.danger{background:#ef4444}button.danger:hover{background:#dc2626}
+button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
+.toolbar{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+</style></head>
+<body><div class="wrap">
+<div class="card">
+  <h1>🐧 服务器 Linux 管理</h1>
+  <p style="color:#6b7280;font-size:14px;margin:0 0 16px">服务状态查看与系统操作</p>
+  <a class="btn sec" href="%s">← 返回面板</a>
+</div>
+
+<div class="card">
+  <h2>📋 运行信息</h2>
+  <div class="row"><span class="label">面板监听地址</span><span class="val">%s</span></div>
+  <div class="row"><span class="label">数据端口</span><span class="val">%s</span></div>
+  <div class="row"><span class="label">服务器 Host</span><span class="val">%s</span></div>
+  <div class="row"><span class="label">数据库路径</span><span class="val">%s</span></div>
+  <div class="row"><span class="label">面板路径</span><span class="val">%s</span></div>
+  <div class="row"><span class="label">Bark 推送</span><span class="val">%s</span></div>
+  <div class="row"><span class="label">Bark Token</span><span class="val">%s</span></div>
+</div>
+
+<div class="card">
+  <h2>⚙️ 系统操作</h2>
+  <p style="font-size:13px;color:#6b7280;margin-bottom:14px">重启服务后面板约1秒内不可访问，会自动恢复。</p>
+  <div class="toolbar">
+    <button class="danger" onclick="restartServer()">🔄 重启 bwpanel 服务</button>
+    <a class="btn sec" href="%s/settings">⚙️ Bark 设置</a>
+  </div>
+</div>
+</div>
+<script>
+const PANEL_PATH = %q;
+function restartServer() {
+  if (!confirm('确认重启服务端？重启过程约1秒，期间面板短暂不可访问。')) return;
+  fetch(PANEL_PATH + '/restart', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'}
+  }).then(() => {
+    alert('重启指令已发出，3秒后自动刷新页面。');
+    setTimeout(() => location.reload(), 3000);
+  }).catch(() => {
+    setTimeout(() => location.reload(), 3000);
+  });
+}
+</script>
+</body></html>`,
+			panelPath,
+			cfg.PanelAddr, cfg.DataAddr, cfg.ServerHost, cfg.DBPath, cfg.PanelPath,
+			barkStatus, barkToken,
+			panelPath,
+			panelPath,
+		)
 	}
 }
 
@@ -846,7 +959,7 @@ textarea{resize:vertical;min-height:60px}
   <div class="toolbar">
     <button type="button" onclick="location.reload()">手动刷新</button>
     <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
-    <button type="button" class="warn" onclick="restartServer()">🔄 重启服务</button>
+    <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器 Linux</a>
     <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
   </div>
 </div>
@@ -858,10 +971,10 @@ textarea{resize:vertical;min-height:60px}
     <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">在对应客户端 VPS 上以 root 运行此命令，配置文件将自动保留。</p>
     <div class="copy-box">
       <input id="upgradeCmd" readonly>
-      <button type="button" class="sec" onclick="copyUpgrade()">复制</button>
+      <button type="button" class="sec" id="copyUpgradeBtn">复制</button>
     </div>
     <div style="margin-top:16px;display:flex;gap:8px">
-      <button type="button" class="sec" onclick="closeUpgrade()">关闭</button>
+      <button type="button" class="sec" id="closeUpgradeBtn">关闭</button>
     </div>
   </div>
 </div>
@@ -882,7 +995,7 @@ textarea{resize:vertical;min-height:60px}
       </div>
       <div style="display:flex;gap:8px">
         <button type="submit">保存</button>
-        <button type="button" class="sec" onclick="closeEdit()">取消</button>
+        <button type="button" class="sec" id="closeEditBtn">取消</button>
       </div>
     </form>
   </div>
@@ -895,7 +1008,7 @@ textarea{resize:vertical;min-height:60px}
     <thead><tr><th>名称</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
-    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}">
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}">
       <td>{{.Name}}</td>
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
@@ -911,8 +1024,8 @@ textarea{resize:vertical;min-height:60px}
           <button type="submit">批准</button>
         </form>
         {{end}}
-        <button type="button" class="sec" onclick="openEdit('{{.ID}}','{{.Name}}','{{.Remark}}')">编辑</button>
-        <button type="button" class="info" onclick="showUpgrade('{{.Name}}','{{.ID}}')">升级命令</button>
+        <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
+        <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级命令</button>
         </div>
       </td>
     </tr>
@@ -988,12 +1101,12 @@ textarea{resize:vertical;min-height:60px}
       <input id="genVersion" value="{{.Version}}" style="margin-top:4px">
     </div>
     <div style="align-self:end">
-      <button type="button" id="genBtn" style="width:100%" onclick="genCmd()">生成命令</button>
+      <button type="button" id="genBtn" style="width:100%">生成命令</button>
     </div>
   </div>
   <div class="copy-box" id="cmdBox" style="display:none">
     <input id="cmdText" readonly>
-    <button type="button" class="sec" onclick="copyCmd()">复制</button>
+    <button type="button" class="sec" id="copyCmdBtn">复制</button>
   </div>
   <div class="tip" id="cmdTip"></div>
 </div>
@@ -1068,10 +1181,11 @@ textarea{resize:vertical;min-height:60px}
 </div>
 
 <script>
-const PANEL_PATH = "{{.PanelPath}}";
-const INIT_TOKEN  = "{{.InitToken}}";
+(function(){
+const PANEL_PATH = {{.PanelPath | js}};
+const INIT_TOKEN  = {{.InitToken | js}};
 const PANEL_ADDR  = location.host;
-const VERSION     = "{{.Version}}";
+const VERSION     = {{.Version | js}};
 
 const clientNameMap = {};
 document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
@@ -1218,76 +1332,76 @@ es.onerror = () => {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
-function openEdit(id, name, remark) {
-  document.getElementById('editID').value = id;
-  document.getElementById('editName').value = name;
-  document.getElementById('editRemark').value = remark;
-  document.getElementById('editModal').classList.add('open');
-}
-function closeEdit() {
+// ── 编辑客户端弹窗 ──
+document.getElementById('closeEditBtn').addEventListener('click', function() {
   document.getElementById('editModal').classList.remove('open');
-}
+});
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.edit-btn');
+  if (!btn) return;
+  document.getElementById('editID').value    = btn.dataset.id;
+  document.getElementById('editName').value  = btn.dataset.name;
+  document.getElementById('editRemark').value = btn.dataset.remark || '';
+  document.getElementById('editModal').classList.add('open');
+});
 
-function showUpgrade(clientName, clientId) {
-  const panelUrl = location.protocol + '//' + PANEL_ADDR;
-  const ver = VERSION || 'latest';
-  const cmd = "curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
-    + ' | bash -s -- '
-    + ' --server-url ' + panelUrl
-    + " --init-token '" + INIT_TOKEN + "'"
-    + " --client-name '" + clientName + "'"
-    + ' --version ' + ver;
-  document.getElementById('upgradeCmd').value = cmd;
-  document.getElementById('upgradeModal').classList.add('open');
-}
-function closeUpgrade() {
+// ── 升级命令弹窗 ──
+document.getElementById('closeUpgradeBtn').addEventListener('click', function() {
   document.getElementById('upgradeModal').classList.remove('open');
-}
-function copyUpgrade() {
+});
+document.getElementById('copyUpgradeBtn').addEventListener('click', function() {
   const el = document.getElementById('upgradeCmd');
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
-}
+});
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.upgrade-btn');
+  if (!btn) return;
+  const clientName = btn.dataset.name || '';
+  const panelUrl   = location.protocol + '//' + PANEL_ADDR;
+  const ver        = VERSION || 'latest';
+  const cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
+    + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
+    + " | bash -s -- "
+    + " --server-url " + panelUrl
+    + " --init-token " + INIT_TOKEN
+    + " --client-name '" + clientName.replace(/'/g, "'\\''") + "'"
+    + " --version " + ver;
+  document.getElementById('upgradeCmd').value = cmd;
+  document.getElementById('upgradeModal').classList.add('open');
+});
 
-function genCmd() {
+// ── 生成客户端安装命令 ──
+document.getElementById('genBtn').addEventListener('click', function() {
   const name    = document.getElementById('genName').value.trim();
   const remark  = document.getElementById('genRemark').value.trim();
   const version = document.getElementById('genVersion').value.trim() || 'latest';
   if (!name) { alert('请填写客户端名称'); return; }
   const panelUrl = location.protocol + '//' + PANEL_ADDR;
-  let cmd = "curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --"
-    + ' --server-url ' + panelUrl
-    + " --init-token '" + INIT_TOKEN + "'"
-    + " --client-name '" + name + "'"
-    + ' --version ' + version;
-  if (remark) cmd += " --remark '" + remark + "'";
+  let cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
+    + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --"
+    + " --server-url " + panelUrl
+    + " --init-token " + INIT_TOKEN
+    + " --client-name '" + name.replace(/'/g, "'\\''") + "'"
+    + " --version " + version;
+  if (remark) cmd += " --remark '" + remark.replace(/'/g, "'\\''") + "'";
   document.getElementById('cmdText').value = cmd;
   document.getElementById('cmdBox').style.display = 'flex';
   document.getElementById('cmdTip').textContent = '将此命令复制到客户端 VPS 上执行即可完成安装与注册。';
-}
-function copyCmd() {
+});
+document.getElementById('copyCmdBtn').addEventListener('click', function() {
   const el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
-}
+});
 
-function restartServer() {
-  if (!confirm('确认重启服务端？重启过程约1秒，期间面板短暂不可访问。')) return;
-  fetch(PANEL_PATH + '/restart', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'}
-  }).then(() => {
-    alert('重启指令已发出，3秒后自动刷新页面。');
-    setTimeout(() => location.reload(), 3000);
-  }).catch(() => {
-    setTimeout(() => location.reload(), 3000);
-  });
-}
+})();
 </script>
 </body>
 </html>`
+
 
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
 			"not": func(b bool) bool { return !b },
@@ -1299,6 +1413,10 @@ function restartServer() {
 			},
 			"divf": func(a int64, b float64) float64 {
 				return float64(a) / b
+			},
+			"js": func(s string) template.JS {
+				b, _ := json.Marshal(s)
+				return template.JS(b)
 			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
@@ -1331,13 +1449,15 @@ func handleSettings(panelPath string, cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			_ = r.ParseForm()
-			newURL := strings.TrimSpace(r.Form.Get("bark_url"))
+			token := strings.TrimSpace(r.Form.Get("bark_token"))
+			newURL := barkURLFromToken(token)
 			_ = os.MkdirAll("/opt/bwtest", 0755)
 			_ = os.WriteFile("/opt/bwtest/bark_url", []byte(newURL), 0600)
 			cfg.BarkURL = newURL
 			http.Redirect(w, r, panelPath, http.StatusFound)
 			return
 		}
+		currentToken := barkTokenFromURL(cfg.BarkURL)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1345,17 +1465,17 @@ func handleSettings(panelPath string, cfg *Config) http.HandlerFunc {
 <style>body{font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;padding:0 16px}
 input{width:100%%;padding:10px;border:1px solid #e5e7eb;border-radius:8px;font-size:14px;box-sizing:border-box}
 button{margin-top:12px;padding:10px 20px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px}
-a{color:#2563eb}label{font-size:13px;color:#6b7280}</style></head>
+a{color:#2563eb}label{font-size:13px;color:#6b7280}code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:12px}</style></head>
 <body><h2>⚙️ Bark 推送设置</h2>
-<p style="font-size:13px;color:#6b7280;margin-bottom:16px">填入 Bark URL（格式：<code>https://api.day.app/你的token</code>），留空则关闭推送。</p>
+<p style="font-size:13px;color:#6b7280;margin-bottom:16px">只需填写 Bark Token，系统会自动拼接为 <code>https://api.day.app/你的token</code>；留空则关闭推送。</p>
 <form method="post">
-<label>Bark URL</label><br>
-<input name="bark_url" value="%%s" placeholder="https://api.day.app/xxxxxx" style="margin-top:6px">
+<label>Bark Token</label><br>
+<input name="bark_token" value="%s" placeholder="填你的 Bark token，例：AbCdEfGhXxXx" style="margin-top:6px">
 <br><button type="submit">保存</button>
-<a href="%%s" style="margin-left:12px;font-size:13px">← 返回</a>
+<a href="%s" style="margin-left:12px;font-size:13px">← 返回</a>
 </form>
 <p style="font-size:12px;color:#9ca3af;margin-top:20px">保存后立即生效，无需重启服务端。配置持久化到 /opt/bwtest/bark_url 文件。</p>
-</body></html>`, cfg.BarkURL, panelPath)
+</body></html>`, currentToken, panelPath)
 	}
 }
 
