@@ -197,6 +197,7 @@ func main() {
 		cfg.PanelAddr, cfg.PanelPath, cfg.DataAddr, cfg.DBPath, cfg.BarkURL != "")
 
 	go runDataServer(cfg, db)
+	go watchStuckTasks(db, broker)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", jsonHandler(handleRegister(cfg, db, broker)))
@@ -205,8 +206,8 @@ func main() {
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
-	// /api/data requires basic auth
-	mux.Handle("/api/data", basicAuth(cfg, http.HandlerFunc(jsonHandler(handleAPIData(db)))))
+	// /api/data is read-only, no auth needed (panel session already protected by basicAuth)
+	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
 
 	p := cfg.PanelPath
 	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
@@ -239,6 +240,40 @@ func resetStuckTasks(db *sql.DB) {
 		log.Printf("resetStuckTasks: reset %d running task(s) to pending", n)
 	}
 	_, _ = db.Exec(`UPDATE clients SET current_task=''`)
+}
+
+// watchStuckTasks 每30秒检查一次：如果客户端心跳超过90秒没有更新，
+// 但任务仍处于running状态，则重置为pending，让客户端重连后自动继续
+func watchStuckTasks(db *sql.DB, broker *Broker) {
+	tk := time.NewTicker(30 * time.Second)
+	defer tk.Stop()
+	for range tk.C {
+		threshold := time.Now().Add(-90 * time.Second).Format(time.RFC3339)
+		rows, err := db.Query(`
+			SELECT t.id, t.client_id FROM tasks t
+			JOIN clients c ON c.id = t.client_id
+			WHERE t.status = 'running'
+			AND c.last_seen < ?`, threshold)
+		if err != nil {
+			continue
+		}
+		type pair struct{ tid, cid string }
+		var pairs []pair
+		for rows.Next() {
+			var p pair
+			_ = rows.Scan(&p.tid, &p.cid)
+			pairs = append(pairs, p)
+		}
+		rows.Close()
+		for _, p := range pairs {
+			_, _ = db.Exec(`UPDATE tasks SET status='pending', started_at='' WHERE id=?`, p.tid)
+			_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, p.cid)
+			log.Printf("watchStuckTasks: reset task %s (client %s) to pending due to heartbeat timeout", p.tid, p.cid)
+		}
+		if len(pairs) > 0 {
+			broker.Publish("tasks")
+		}
+	}
 }
 
 func mustInitDB(path string) *sql.DB {
@@ -699,10 +734,9 @@ func handleRestart(panelPath string) http.HandlerFunc {
 			http.Redirect(w, r, panelPath, http.StatusFound)
 			return
 		}
-		// 异步执行重启，让当前请求能正常返回
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			_ = exec.Command("systemctl", "restart", "bwpanel-server").Run()
+			_ = exec.Command("systemctl", "restart", "bwpanel").Run()
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "msg": "重启指令已发出，服务将在1秒内重启"})
@@ -957,7 +991,7 @@ textarea{resize:vertical;min-height:60px}
       <input id="genVersion" value="{{.Version}}" style="margin-top:4px">
     </div>
     <div style="align-self:end">
-      <button type="button" onclick="genCmd()" style="width:100%">生成命令</button>
+      <button type="button" id="genBtn" style="width:100%" onclick="genCmd()">生成命令</button>
     </div>
   </div>
   <div class="copy-box" id="cmdBox" style="display:none">
@@ -1042,7 +1076,6 @@ const INIT_TOKEN  = "{{.InitToken}}";
 const PANEL_ADDR  = location.host;
 const VERSION     = "{{.Version}}";
 
-// 客户端名称映射（从初始渲染提取）
 const clientNameMap = {};
 document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
   clientNameMap[row.dataset.clientId] = row.dataset.name || row.dataset.clientId;
@@ -1077,7 +1110,6 @@ function tickPing() {
 setInterval(tickPing, 1000);
 tickPing();
 
-// 记录上次已知的任务状态，用于检测变化
 const knownTaskStatus = {};
 
 function buildRunningRow(t) {
@@ -1111,61 +1143,41 @@ function buildHistoryRow(t) {
 }
 
 function pollData() {
-  fetch('/api/data', {headers: {'Authorization': 'Basic ' + btoa(location.host)}})
-    .then(r => r.json())
+  fetch('/api/data')
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(data => {
       const tasks = data.tasks || [];
       const runningStatuses = ['running', 'pending', 'stopping'];
-
       const runningTasks = tasks.filter(t => runningStatuses.includes(t.status));
       const historyTasks = tasks.filter(t => !runningStatuses.includes(t.status));
 
       let needFullRefresh = false;
-
-      // 检查是否有任务状态变化（running <-> done/stopped）
       tasks.forEach(t => {
         const prev = knownTaskStatus[t.id];
         if (prev !== undefined && prev !== t.status) {
-          // 状态发生变化
           if (runningStatuses.includes(prev) !== runningStatuses.includes(t.status)) {
             needFullRefresh = true;
           }
         }
         knownTaskStatus[t.id] = t.status;
       });
-
-      // 检查是否有新任务出现在运行列表但页面没有对应行
       runningTasks.forEach(t => {
-        if (!document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`)) {
-          needFullRefresh = true;
-        }
+        if (!document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`)) needFullRefresh = true;
       });
       historyTasks.forEach(t => {
-        if (!document.querySelector(`#historyTaskBody [data-task-id="${t.id}"]`)) {
-          needFullRefresh = true;
-        }
+        if (!document.querySelector(`#historyTaskBody [data-task-id="${t.id}"]`)) needFullRefresh = true;
       });
 
       if (needFullRefresh) {
-        // 全量重渲染两个表格
         const rb = document.getElementById('runningTaskBody');
-        if (rb) {
-          if (runningTasks.length === 0) {
-            rb.innerHTML = '<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>';
-          } else {
-            rb.innerHTML = runningTasks.map(buildRunningRow).join('');
-          }
-        }
+        if (rb) rb.innerHTML = runningTasks.length === 0
+          ? '<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
+          : runningTasks.map(buildRunningRow).join('');
         const hb = document.getElementById('historyTaskBody');
-        if (hb) {
-          if (historyTasks.length === 0) {
-            hb.innerHTML = '<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>';
-          } else {
-            hb.innerHTML = historyTasks.map(buildHistoryRow).join('');
-          }
-        }
+        if (hb) hb.innerHTML = historyTasks.length === 0
+          ? '<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>'
+          : historyTasks.map(buildHistoryRow).join('');
       } else {
-        // 只更新进度数据
         runningTasks.forEach(t => {
           const row = document.querySelector(`#runningTaskBody [data-task-id="${t.id}"]`);
           if (!row) return;
@@ -1178,7 +1190,6 @@ function pollData() {
         });
       }
 
-      // 更新客户端心跳和当前任务
       const clients = data.clients || [];
       clients.forEach(c => {
         const row = document.querySelector(`#clientBody [data-client-id="${c.id}"]`);
