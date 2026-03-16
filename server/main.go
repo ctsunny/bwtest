@@ -33,7 +33,7 @@ type Config struct {
 	AdminPass  string
 	DBPath     string
 	PanelPath  string
-	BarkURL    string // e.g. https://api.day.app/your-token
+	BarkURL    string
 }
 
 type Client struct {
@@ -146,17 +146,12 @@ func (b *Broker) Publish(msg string) {
 	}
 }
 
-// barkPush sends a Bark notification. barkURL format: https://api.day.app/token
 func barkPush(barkURL, title, body string) {
 	if barkURL == "" {
 		return
 	}
 	base := strings.TrimRight(barkURL, "/")
-	pushURL := fmt.Sprintf("%s/%s/%s",
-		base,
-		url.PathEscape(title),
-		url.PathEscape(body),
-	)
+	pushURL := fmt.Sprintf("%s/%s/%s", base, url.PathEscape(title), url.PathEscape(body))
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(pushURL)
 	if err != nil {
@@ -184,9 +179,6 @@ func main() {
 
 	db := mustInitDB(cfg.DBPath)
 	broker := NewBroker()
-
-	// On startup: reset any tasks stuck in 'running' back to 'pending' so they
-	// get picked up again after a server/client restart.
 	resetStuckTasks(db)
 
 	log.Printf("panel=%s%s data=%s db=%s bark=%v",
@@ -221,7 +213,6 @@ func main() {
 	log.Fatal(http.ListenAndServe(cfg.PanelAddr, mux))
 }
 
-// resetStuckTasks resets running tasks to pending on server restart.
 func resetStuckTasks(db *sql.DB) {
 	res, err := db.Exec(`UPDATE tasks SET status='pending', started_at='' WHERE status='running'`)
 	if err != nil {
@@ -232,19 +223,16 @@ func resetStuckTasks(db *sql.DB) {
 	if n > 0 {
 		log.Printf("resetStuckTasks: reset %d running task(s) to pending", n)
 	}
-	// Also clear current_task on all clients so they pick up fresh
 	_, _ = db.Exec(`UPDATE clients SET current_task=''`)
 }
 
 func mustInitDB(path string) *sql.DB {
 	dir := filepath.Dir(path)
 	_ = os.MkdirAll(dir, 0755)
-
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	stmts := []string{
 		`PRAGMA journal_mode = WAL;`,
 		`CREATE TABLE IF NOT EXISTS clients(
@@ -273,7 +261,6 @@ func mustInitDB(path string) *sql.DB {
 			download_bytes INTEGER NOT NULL DEFAULT 0
 		);`,
 	}
-
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column") {
@@ -281,7 +268,6 @@ func mustInitDB(path string) *sql.DB {
 			}
 		}
 	}
-
 	return db
 }
 
@@ -301,18 +287,15 @@ func runDataServer(cfg Config, db *sql.DB) {
 func handleDataConn(db *sql.DB, conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-
 	br := bufio.NewReader(conn)
 	line, err := br.ReadBytes('\n')
 	if err != nil {
 		return
 	}
-
 	var hello DataHello
 	if err := json.Unmarshal(line, &hello); err != nil {
 		return
 	}
-
 	var token, status, mode string
 	var downMbps, duration int
 	err = db.QueryRow(`
@@ -325,16 +308,12 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 	if err != nil || token != hello.ClientToken || status != "running" {
 		return
 	}
-
 	_ = conn.SetDeadline(time.Time{})
-
 	deadline := time.Now().Add(time.Duration(duration) * time.Second)
-
 	effMode := hello.Mode
 	if effMode == "" {
 		effMode = mode
 	}
-
 	switch effMode {
 	case "upload":
 		readDiscardLoop(conn, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
@@ -374,13 +353,10 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 	if perTick < 1024 {
 		perTick = 1024
 	}
-
 	buf := make([]byte, 32*1024)
 	_, _ = rand.Read(buf)
-
 	tk := time.NewTicker(100 * time.Millisecond)
 	defer tk.Stop()
-
 	for time.Now().Before(deadline) && keep() {
 		left := perTick
 		for left > 0 && keep() {
@@ -409,42 +385,32 @@ func handleRegister(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			http.Error(w, "bad request", 400)
 			return
 		}
-
 		now := time.Now().Format(time.RFC3339)
 		var token string
 		err := db.QueryRow(`SELECT token FROM clients WHERE id=?`, req.ClientID).Scan(&token)
-
 		if err == sql.ErrNoRows {
 			if req.InitToken != cfg.InitToken {
 				http.Error(w, "bad init token", 401)
 				return
 			}
-			_, err = db.Exec(`
-				INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task)
-				VALUES(?,?,?,?,?,?,?,?)`,
+			_, err = db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task) VALUES(?,?,?,?,?,?,?,?)`,
 				req.ClientID, req.Name, "", req.ClientToken, 0, now, realIP(r), "")
 			if err != nil {
 				http.Error(w, err.Error(), 500)
 				return
 			}
 			broker.Publish("clients")
-			// Bark: new client registration
-			go barkPush(cfg.BarkURL,
-				"新客户端申请",
-				fmt.Sprintf("客户端 %s (%s) 申请接入，请到面板批准。", req.Name, realIP(r)),
-			)
+			go barkPush(cfg.BarkURL, "新客户端申请",
+				fmt.Sprintf("客户端 %s (%s) 申请接入，请到面板批准。", req.Name, realIP(r)))
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "approved": false})
 			return
 		}
-
 		if err != nil || token != req.ClientToken {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-
 		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, name=? WHERE id=?`,
 			now, realIP(r), req.Name, req.ClientID)
-
 		var approved int
 		_ = db.QueryRow(`SELECT approved FROM clients WHERE id=?`, req.ClientID).Scan(&approved)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "approved": approved == 1})
@@ -458,16 +424,13 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-
 		var token string
 		if err := db.QueryRow(`SELECT token FROM clients WHERE id=?`, req.ClientID).Scan(&token); err != nil || token != req.ClientToken {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-
 		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=? WHERE id=?`,
 			time.Now().Format(time.RFC3339), realIP(r), req.ClientID)
-
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
@@ -476,7 +439,6 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clientID := r.URL.Query().Get("client_id")
 		clientToken := r.URL.Query().Get("client_token")
-
 		var token string
 		var approved int
 		var currentTask string
@@ -486,19 +448,15 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-
 		if currentTask != "" && taskStatus(db, currentTask) == "running" {
 			w.WriteHeader(204)
 			return
 		}
-
 		var t Task
 		err = db.QueryRow(`
 			SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at
-			FROM tasks
-			WHERE client_id=? AND status='pending'
-			ORDER BY created_at ASC
-			LIMIT 1`, clientID).
+			FROM tasks WHERE client_id=? AND status='pending'
+			ORDER BY created_at ASC LIMIT 1`, clientID).
 			Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Status, &t.CreatedAt)
 		if err == sql.ErrNoRows {
 			w.WriteHeader(204)
@@ -508,33 +466,22 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-
 		now := time.Now().Format(time.RFC3339)
 		_, _ = db.Exec(`UPDATE tasks SET status='running', started_at=? WHERE id=?`, now, t.ID)
 		_, _ = db.Exec(`UPDATE clients SET current_task=? WHERE id=?`, t.ID, clientID)
 		broker.Publish("tasks")
-
-		// Bark: task started
 		clientName := clientID
 		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
-		go barkPush(cfg.BarkURL,
-			"任务开始",
+		go barkPush(cfg.BarkURL, "任务开始",
 			fmt.Sprintf("客户端 %s 开始执行任务\n模式:%s 上传:%dMbps 下载:%dMbps 时长:%ds",
-				clientName, t.Mode, t.UpMbps, t.DownMbps, t.DurationSec),
-		)
-
+				clientName, t.Mode, t.UpMbps, t.DownMbps, t.DurationSec))
 		addr := cfg.DataAddr
 		if strings.HasPrefix(addr, ":") {
 			addr = cfg.ServerHost + addr
 		}
-
 		_ = json.NewEncoder(w).Encode(AssignResp{
-			ID:          t.ID,
-			Mode:        t.Mode,
-			UpMbps:      t.UpMbps,
-			DownMbps:    t.DownMbps,
-			DurationSec: t.DurationSec,
-			DataAddr:    addr,
+			ID: t.ID, Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
+			DurationSec: t.DurationSec, DataAddr: addr,
 		})
 	}
 }
@@ -546,20 +493,16 @@ func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-
 		var token, status, clientID string
 		err := db.QueryRow(`
 			SELECT c.token, t.status, t.client_id
-			FROM clients c
-			JOIN tasks t ON c.id=t.client_id
-			WHERE c.id=? AND t.id=?`,
-			req.ClientID, req.TaskID).
+			FROM clients c JOIN tasks t ON c.id=t.client_id
+			WHERE c.id=? AND t.id=?`, req.ClientID, req.TaskID).
 			Scan(&token, &status, &clientID)
 		if err != nil || token != req.ClientToken || clientID != req.ClientID {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-
 		finalStatus := req.Status
 		if finalStatus == "" {
 			finalStatus = "done"
@@ -567,14 +510,10 @@ func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		if status == "stopping" {
 			finalStatus = "stopped"
 		}
-
 		_, _ = db.Exec(`UPDATE tasks SET status=?, finished_at=?, upload_bytes=?, download_bytes=? WHERE id=?`,
 			finalStatus, time.Now().Format(time.RFC3339), req.UploadBytes, req.DownloadBytes, req.TaskID)
 		_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, req.ClientID)
-
 		broker.Publish("tasks")
-
-		// Bark: task finished / stopped / failed
 		clientName := req.ClientID
 		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, req.ClientID).Scan(&clientName)
 		upGB := float64(req.UploadBytes) / (1024 * 1024 * 1024)
@@ -588,12 +527,9 @@ func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		default:
 			barkTitle = "任务中断"
 		}
-		go barkPush(cfg.BarkURL,
-			barkTitle,
+		go barkPush(cfg.BarkURL, barkTitle,
 			fmt.Sprintf("客户端 %s 任务结束 [%s]\n上传:%.3fGB 下载:%.3fGB",
-				clientName, finalStatus, upGB, dnGB),
-		)
-
+				clientName, finalStatus, upGB, dnGB))
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
@@ -603,20 +539,15 @@ func handleTaskControl(db *sql.DB) http.HandlerFunc {
 		clientID := r.URL.Query().Get("client_id")
 		clientToken := r.URL.Query().Get("client_token")
 		taskID := r.URL.Query().Get("task_id")
-
 		var token, status string
 		err := db.QueryRow(`
-			SELECT c.token, t.status
-			FROM clients c
-			JOIN tasks t ON c.id=t.client_id
-			WHERE c.id=? AND t.id=?`,
-			clientID, taskID).
-			Scan(&token, &status)
+			SELECT c.token, t.status FROM clients c
+			JOIN tasks t ON c.id=t.client_id WHERE c.id=? AND t.id=?`,
+			clientID, taskID).Scan(&token, &status)
 		if err != nil || token != clientToken {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-
 		_ = json.NewEncoder(w).Encode(ControlResp{Status: status})
 	}
 }
@@ -628,15 +559,11 @@ func handleTaskProgress(db *sql.DB) http.HandlerFunc {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-
 		var token, status string
 		err := db.QueryRow(`
-			SELECT c.token, t.status
-			FROM clients c
-			JOIN tasks t ON c.id=t.client_id
-			WHERE c.id=? AND t.id=?`,
-			req.ClientID, req.TaskID).
-			Scan(&token, &status)
+			SELECT c.token, t.status FROM clients c
+			JOIN tasks t ON c.id=t.client_id WHERE c.id=? AND t.id=?`,
+			req.ClientID, req.TaskID).Scan(&token, &status)
 		if err != nil || token != req.ClientToken {
 			http.Error(w, "unauthorized", 401)
 			return
@@ -645,10 +572,8 @@ func handleTaskProgress(db *sql.DB) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
 			return
 		}
-
 		_, _ = db.Exec(`UPDATE tasks SET upload_bytes=?, download_bytes=? WHERE id=?`,
 			req.UploadBytes, req.DownloadBytes, req.TaskID)
-
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
@@ -686,7 +611,6 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 		for _, c := range clients {
 			clientNames[c.ID] = c.Name
 		}
-
 		cj := make([]clientJSON, 0, len(clients))
 		for _, c := range clients {
 			cj = append(cj, clientJSON{
@@ -695,28 +619,20 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				RemoteIP: c.RemoteIP, CurrentTask: c.CurrentTask,
 			})
 		}
-
 		tj := make([]taskJSON, 0, len(tasks))
 		for _, t := range tasks {
 			tj = append(tj, taskJSON{
 				ID: t.ID, ClientID: t.ClientID,
 				ClientName:  clientNames[t.ClientID],
 				Mode:        t.Mode,
-				UpMbps:      t.UpMbps,
-				DownMbps:    t.DownMbps,
-				DurationSec: t.DurationSec,
-				Status:      t.Status,
-				StartedAt:   t.StartedAt,
-				FinishedAt:  t.FinishedAt,
+				UpMbps:      t.UpMbps, DownMbps: t.DownMbps,
+				DurationSec: t.DurationSec, Status: t.Status,
+				StartedAt:   t.StartedAt, FinishedAt: t.FinishedAt,
 				UploadGB:    float64(t.UploadBytes) / (1024 * 1024 * 1024),
 				DownloadGB:  float64(t.DownloadBytes) / (1024 * 1024 * 1024),
 			})
 		}
-
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"clients": cj,
-			"tasks":   tj,
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"clients": cj, "tasks": tj})
 	}
 }
 
@@ -744,7 +660,6 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			ID   string
 			Name string
 		}
-
 		type pageData struct {
 			Clients         []Client
 			Tasks           []Task
@@ -770,7 +685,6 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-
 		version := getenv("BWPANEL_VERSION", "latest")
 
 		const page = `<!doctype html>
@@ -783,16 +697,17 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 :root{--bg:#f5f7fb;--card:#fff;--border:#e5e7eb;--text:#111827;--muted:#6b7280;--primary:#2563eb;--ph:#1d4ed8;--ok-bg:#dcfce7;--ok:#166534;--no-bg:#fee2e2;--no:#991b1b;--run-bg:#dbeafe;--run:#1d4ed8;--done-bg:#dcfce7;--done:#166534;--pend-bg:#f3f4f6;--pend:#374151;--warn-bg:#fef3c7;--warn:#92400e;--stop-bg:#ffedd5;--stop:#9a3412}
 *{box-sizing:border-box}
 body{margin:0;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
-.wrap{max-width:1280px;margin:0 auto}
+.wrap{max-width:1400px;margin:0 auto}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
 h1{margin:0 0 6px;font-size:36px}h2{margin:0 0 14px;font-size:20px}p{margin:0;color:var(--muted);font-size:14px}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
 .note{font-size:13px;color:var(--muted)}
 #liveStatus{font-size:13px;color:var(--muted)}
-btn,button,.btn{border:none;border-radius:9px;padding:9px 14px;background:var(--primary);color:#fff;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;white-space:nowrap}
+button,.btn{border:none;border-radius:9px;padding:9px 14px;background:var(--primary);color:#fff;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;white-space:nowrap}
 button:hover,.btn:hover{background:var(--ph)}
 button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
 button.danger{background:#ef4444;color:#fff}button.danger:hover{background:#dc2626}
+button.info{background:#0891b2;color:#fff}button.info:hover{background:#0e7490}
 form.inline{display:inline}
 .tbl{overflow:auto}
 table{width:100%;border-collapse:collapse}
@@ -803,6 +718,9 @@ th{background:#f9fafb;font-weight:700}
 .running{background:var(--run-bg);color:var(--run)}.done{background:var(--done-bg);color:var(--done)}
 .pending{background:var(--pend-bg);color:var(--pend)}.stopped{background:var(--warn-bg);color:var(--warn)}
 .stopping{background:var(--stop-bg);color:var(--stop)}
+.ping-ok{color:#16a34a;font-weight:700}
+.ping-warn{color:#d97706;font-weight:700}
+.ping-dead{color:#dc2626;font-weight:700}
 .grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
 .dur-wrap{display:flex;gap:6px}
 .dur-wrap input{flex:1}
@@ -813,6 +731,8 @@ textarea{resize:vertical;min-height:60px}
 .copy-box{display:flex;gap:8px;align-items:center;margin-top:10px}
 .copy-box input{font-family:monospace;font-size:12px;background:#f9fafb}
 .gen-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
+#upgradeModal .modal-inner{background:#fff;border-radius:14px;padding:22px;width:min(600px,95vw)}
+#upgradeModal input{font-family:monospace;font-size:12px;background:#f9fafb}
 @media(max-width:960px){.grid{grid-template-columns:1fr 1fr}.gen-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:640px){body{padding:10px}.grid,.gen-grid{grid-template-columns:1fr}h1{font-size:26px}}
 </style>
@@ -830,37 +750,22 @@ textarea{resize:vertical;min-height:60px}
   </div>
 </div>
 
-<div class="card">
-  <h2>客户端列表</h2>
-  <div class="tbl" id="clientTableWrap">
-  <table>
-    <tr><th>名称</th><th>备注</th><th>已批准</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr>
-    {{range .Clients}}
-    <tr>
-      <td>{{.Name}}</td>
-      <td>{{.Remark}}</td>
-      <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
-      <td>{{.LastSeen}}</td>
-      <td>{{.RemoteIP}}</td>
-      <td style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
-      <td>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-        {{if not .Approved}}
-        <form class="inline" method="post" action="{{$.PanelPath}}/approve">
-          <input type="hidden" name="client_id" value="{{.ID}}">
-          <button type="submit">批准</button>
-        </form>
-        {{end}}
-        <button type="button" class="sec" onclick="openEdit('{{.ID}}','{{.Name}}','{{.Remark}}')">编辑</button>
-        </div>
-      </td>
-    </tr>
-    {{end}}
-  </table>
+<!-- 升级命令弹窗 -->
+<div id="upgradeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
+  <div class="modal-inner">
+    <h2>📦 客户端升级命令</h2>
+    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">在对应客户端 VPS 上以 root 运行此命令，配置文件将自动保留。</p>
+    <div class="copy-box">
+      <input id="upgradeCmd" readonly>
+      <button type="button" class="sec" onclick="copyUpgrade()">复制</button>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button type="button" class="sec" onclick="closeUpgrade()">关闭</button>
+    </div>
   </div>
-  <div class="tip">创建任务前请确认客户端已批准。</div>
 </div>
 
+<!-- 编辑客户端弹窗 -->
 <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
   <div class="card" style="width:min(480px,95vw);margin:0">
     <h2>编辑客户端</h2>
@@ -883,12 +788,47 @@ textarea{resize:vertical;min-height:60px}
 </div>
 
 <div class="card">
+  <h2>客户端列表</h2>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>名称</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
+    <tbody id="clientBody">
+    {{range .Clients}}
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}">
+      <td>{{.Name}}</td>
+      <td>{{.Remark}}</td>
+      <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
+      <td class="ping-col">-</td>
+      <td class="lastseen-col">{{.LastSeen}}</td>
+      <td>{{.RemoteIP}}</td>
+      <td class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
+      <td>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        {{if not .Approved}}
+        <form class="inline" method="post" action="{{$.PanelPath}}/approve">
+          <input type="hidden" name="client_id" value="{{.ID}}">
+          <button type="submit">批准</button>
+        </form>
+        {{end}}
+        <button type="button" class="sec" onclick="openEdit('{{.ID}}','{{.Name}}','{{.Remark}}')">编辑</button>
+        <button type="button" class="info" onclick="showUpgrade('{{.Name}}','{{.ID}}')" title="获取此客户端的升级/重装命令">升级命令</button>
+        </div>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  <div class="tip">心跳延迟：距上次心跳的秒数，超过 60s 变红。创建任务前请确认客户端已批准。</div>
+</div>
+
+<div class="card">
   <h2>创建任务</h2>
   <form method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
         <label class="note">选择客户端</label>
-        <select id="client_id" name="client_id" required style="margin-top:4px">
+        <select name="client_id" required style="margin-top:4px">
           {{range .ApprovedClients}}
           <option value="{{.ID}}" {{if eq .ID $.DefaultClientID}}selected{{end}}>{{.Name}}</option>
           {{end}}
@@ -960,7 +900,7 @@ textarea{resize:vertical;min-height:60px}
 <div class="card">
   <h2>任务列表 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
-  <table id="taskTable">
+  <table>
     <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
     <tbody id="taskBody">
     {{range .Tasks}}
@@ -994,19 +934,50 @@ textarea{resize:vertical;min-height:60px}
 
 <script>
 const PANEL_PATH = "{{.PanelPath}}";
-const SERVER_HOST = "{{.ServerHost}}";
 const INIT_TOKEN  = "{{.InitToken}}";
 const PANEL_ADDR  = location.host;
+const VERSION     = "{{.Version}}";
 
 function fmtGB(gb) {
   if (gb < 0.001) return '0.000 GB';
   return gb.toFixed(3) + ' GB';
 }
 
+// 计算心跳延迟
+function calcPing(lastSeen) {
+  if (!lastSeen) return null;
+  const t = new Date(lastSeen);
+  if (isNaN(t)) return null;
+  return Math.floor((Date.now() - t.getTime()) / 1000);
+}
+
+function renderPing(sec) {
+  if (sec === null) return { text: '?', cls: 'ping-warn' };
+  if (sec < 30)  return { text: sec + 's', cls: 'ping-ok' };
+  if (sec < 60)  return { text: sec + 's', cls: 'ping-warn' };
+  return { text: sec + 's ⚠', cls: 'ping-dead' };
+}
+
+// 每秒更新客户端心跳延迟（纯前端计算，不需要额外请求）
+function tickPing() {
+  document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
+    const lastSeen = row.dataset.lastSeen;
+    const cell = row.querySelector('.ping-col');
+    if (!cell) return;
+    const sec = calcPing(lastSeen);
+    const r = renderPing(sec);
+    cell.textContent = r.text;
+    cell.className = 'ping-col ' + r.cls;
+  });
+}
+setInterval(tickPing, 1000);
+tickPing();
+
 function pollData() {
   fetch('/api/data')
     .then(r => r.json())
     .then(data => {
+      // 更新任务行
       const tasks = data.tasks || [];
       tasks.forEach(t => {
         const row = document.querySelector('[data-task-id="' + t.id + '"]');
@@ -1016,31 +987,38 @@ function pollData() {
         if (upCol) upCol.textContent = fmtGB(t.upload_gb);
         if (dnCol) dnCol.textContent = fmtGB(t.download_gb);
         const badge = row.querySelector('.badge');
-        if (badge) {
-          badge.className = 'badge ' + t.status;
-          badge.textContent = t.status;
-        }
+        if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
       });
+      // 更新客户端行的 last_seen（让前端 ping 计算更准）
+      const clients = data.clients || [];
+      clients.forEach(c => {
+        const row = document.querySelector('[data-client-id="' + c.id + '"]');
+        if (!row) return;
+        if (c.last_seen) row.dataset.lastSeen = c.last_seen;
+        const ctCell = row.querySelector('.curtask-col');
+        if (ctCell) ctCell.textContent = c.current_task || '';
+      });
+      tickPing();
       const hint = document.getElementById('taskRefreshHint');
       if (hint) hint.textContent = '(上次刷新: ' + new Date().toLocaleTimeString() + ')';
     })
     .catch(() => {});
 }
-
 setInterval(pollData, 5000);
 pollData();
 
 const es = new EventSource(PANEL_PATH + '/events');
 const liveStatus = document.getElementById('liveStatus');
-es.onmessage = function(e) {
+es.onmessage = e => {
   if (e.data !== 'ping' && e.data !== 'ready') {
     if (liveStatus) liveStatus.textContent = '检测到状态变化，数据将在下次轮询时自动更新。';
   }
 };
-es.onerror = function() {
+es.onerror = () => {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
+// 编辑客户端
 function openEdit(id, name, remark) {
   document.getElementById('editID').value = id;
   document.getElementById('editName').value = name;
@@ -1051,6 +1029,30 @@ function closeEdit() {
   document.getElementById('editModal').style.display = 'none';
 }
 
+// 升级命令弹窗
+function showUpgrade(clientName, clientId) {
+  const panelUrl = location.protocol + '//' + PANEL_ADDR;
+  const ver = VERSION || 'latest';
+  const cmd = 'curl --proto \'=https\' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh'
+    + ' | bash -s -- '
+    + ' --server-url ' + panelUrl
+    + ' --init-token \'' + INIT_TOKEN + '\''
+    + ' --client-name \'' + clientName + '\''
+    + ' --version ' + ver;
+  document.getElementById('upgradeCmd').value = cmd;
+  document.getElementById('upgradeModal').style.display = 'flex';
+}
+function closeUpgrade() {
+  document.getElementById('upgradeModal').style.display = 'none';
+}
+function copyUpgrade() {
+  const el = document.getElementById('upgradeCmd');
+  el.select();
+  document.execCommand('copy');
+  alert('已复制到剪贴板');
+}
+
+// 生成新安装命令
 function genCmd() {
   const name    = document.getElementById('genName').value.trim();
   const remark  = document.getElementById('genRemark').value.trim();
@@ -1101,21 +1103,17 @@ function copyCmd() {
 	}
 }
 
-// handleSettings: GET shows form, POST saves BARK_URL to env file and restarts.
 func handleSettings(panelPath string, cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			_ = r.ParseForm()
 			newURL := strings.TrimSpace(r.Form.Get("bark_url"))
-			// Persist to /opt/bwtest/bark_url file so install script can pick up
 			_ = os.MkdirAll("/opt/bwtest", 0755)
 			_ = os.WriteFile("/opt/bwtest/bark_url", []byte(newURL), 0600)
-			// Update in-memory (takes effect for next push; full restart not required)
 			cfg.BarkURL = newURL
 			http.Redirect(w, r, panelPath, http.StatusFound)
 			return
 		}
-		// GET: render simple form
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1142,22 +1140,17 @@ func handleEvents(b *Broker) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "stream unsupported", 500)
 			return
 		}
-
 		ch := b.Subscribe()
 		defer b.Unsubscribe(ch)
-
 		fmt.Fprintf(w, "data: ready\n\n")
 		flusher.Flush()
-
 		tk := time.NewTicker(20 * time.Second)
 		defer tk.Stop()
-
 		for {
 			select {
 			case <-r.Context().Done():
@@ -1200,7 +1193,6 @@ func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.Handler
 func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-
 		clientID := r.Form.Get("client_id")
 		mode := r.Form.Get("mode")
 		up, _ := strconv.Atoi(r.Form.Get("up_mbps"))
@@ -1217,17 +1209,13 @@ func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) 
 		if down < 0 {
 			down = 0
 		}
-
 		id := genToken(8)
-		_, err := db.Exec(`
-			INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at)
-			VALUES(?,?,?,?,?,?,?,?)`,
+		_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at) VALUES(?,?,?,?,?,?,?,?)`,
 			id, clientID, mode, up, down, dur, "pending", time.Now().Format(time.RFC3339))
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-
 		broker.Publish("tasks")
 		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
@@ -1249,7 +1237,6 @@ func mustClients(db *sql.DB) []Client {
 		return nil
 	}
 	defer rows.Close()
-
 	var out []Client
 	for rows.Next() {
 		var c Client
@@ -1258,10 +1245,7 @@ func mustClients(db *sql.DB) []Client {
 		c.Approved = approved == 1
 		out = append(out, c)
 	}
-
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].LastSeen > out[j].LastSeen
-	})
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen > out[j].LastSeen })
 	return out
 }
 
@@ -1271,17 +1255,13 @@ func mustTasks(db *sql.DB) []Task {
 		return nil
 	}
 	defer rows.Close()
-
 	var out []Task
 	for rows.Next() {
 		var t Task
 		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.UploadBytes, &t.DownloadBytes)
 		out = append(out, t)
 	}
-
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAt > out[j].CreatedAt
-	})
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out
 }
 
