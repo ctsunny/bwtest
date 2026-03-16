@@ -53,6 +53,14 @@ type ResultReq struct {
 	DownloadBytes int64  `json:"download_bytes"`
 }
 
+type ProgressReq struct {
+	ClientID      string `json:"client_id"`
+	ClientToken   string `json:"client_token"`
+	TaskID        string `json:"task_id"`
+	UploadBytes   int64  `json:"upload_bytes"`
+	DownloadBytes int64  `json:"download_bytes"`
+}
+
 type ControlResp struct {
 	Status string `json:"status"`
 }
@@ -99,7 +107,6 @@ func loadOrCreateConfig(path string) (*Config, error) {
 		if cfg.ClientToken == "" {
 			cfg.ClientToken = token(16)
 		}
-		// persist generated ids if needed
 		b2, _ := json.MarshalIndent(cfg, "", "  ")
 		_ = os.WriteFile(path, b2, 0600)
 		return &cfg, nil
@@ -214,6 +221,27 @@ func taskControl(cfg *Config, taskID string) (string, error) {
 	return c.Status, nil
 }
 
+// progressLoop reports upload/download bytes to server every 5s while task is running.
+// upBytes and downBytes are pointers to atomic int64 counters.
+func progressLoop(cfg *Config, taskID string, upBytes, downBytes *int64, stop <-chan struct{}) {
+	tk := time.NewTicker(5 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tk.C:
+			_ = postJSON(cfg.ServerURL+"/api/task/progress", ProgressReq{
+				ClientID:      cfg.ClientID,
+				ClientToken:   cfg.ClientToken,
+				TaskID:        taskID,
+				UploadBytes:   atomic.LoadInt64(upBytes),
+				DownloadBytes: atomic.LoadInt64(downBytes),
+			}, nil)
+		}
+	}
+}
+
 func runTask(cfg *Config, t *Task) (int64, int64, string) {
 	conn, err := net.DialTimeout("tcp", t.DataAddr, 5*time.Second)
 	if err != nil {
@@ -236,16 +264,17 @@ func runTask(cfg *Config, t *Task) (int64, int64, string) {
 	deadline := time.Now().Add(time.Duration(t.DurationSec) * time.Second)
 	var stopFlag int32
 
+	// control poller: check if server requests stop
 	go func() {
 		tk := time.NewTicker(2 * time.Second)
 		defer tk.Stop()
 		for range tk.C {
+			if atomic.LoadInt32(&busy) == 0 {
+				return
+			}
 			status, err := taskControl(cfg, t.ID)
 			if err == nil && status == "stopping" {
 				atomic.StoreInt32(&stopFlag, 1)
-				return
-			}
-			if atomic.LoadInt32(&busy) == 0 {
 				return
 			}
 		}
@@ -255,38 +284,80 @@ func runTask(cfg *Config, t *Task) (int64, int64, string) {
 		return time.Now().After(deadline) || atomic.LoadInt32(&stopFlag) == 1
 	}
 
+	// progress counters
+	var upBytes, downBytes int64
+	progressStop := make(chan struct{})
+	go progressLoop(cfg, t.ID, &upBytes, &downBytes, progressStop)
+	defer close(progressStop)
+
+	var up, down int64
+	var finalStatus string
+
 	switch t.Mode {
 	case "upload":
-		up := pacedUpload(conn, t.UpMbps, shouldStop)
+		up = pacedUpload(conn, t.UpMbps, shouldStop, &upBytes)
 		if atomic.LoadInt32(&stopFlag) == 1 {
-			return up, 0, "stopped"
+			finalStatus = "stopped"
+		} else {
+			finalStatus = "done"
 		}
-		return up, 0, "done"
 	case "download":
-		down := readCount(conn, shouldStop)
+		down = readCount(conn, shouldStop, &downBytes)
 		if atomic.LoadInt32(&stopFlag) == 1 {
-			return 0, down, "stopped"
+			finalStatus = "stopped"
+		} else {
+			finalStatus = "done"
 		}
-		return 0, down, "done"
 	case "both":
-		var down int64
+		// both mode: use two separate connections to avoid read/write contention
+		// upload on this conn, open a second conn for download
+		conn2, err2 := net.DialTimeout("tcp", t.DataAddr, 5*time.Second)
+		if err2 != nil {
+			log.Printf("dial2 error: %v", err2)
+			// fallback: just do upload on single conn
+			up = pacedUpload(conn, t.UpMbps, shouldStop, &upBytes)
+			finalStatus = "done"
+			break
+		}
+		defer conn2.Close()
+
+		// send hello for download conn
+		hello2, _ := json.Marshal(DataHello{
+			ClientID:    cfg.ClientID,
+			ClientToken: cfg.ClientToken,
+			TaskID:      t.ID,
+			Mode:        "download",
+			DurationSec: t.DurationSec,
+		})
+		if _, err := conn2.Write(append(hello2, '\n')); err != nil {
+			conn2.Close()
+			up = pacedUpload(conn, t.UpMbps, shouldStop, &upBytes)
+			finalStatus = "done"
+			break
+		}
+
 		done := make(chan struct{})
 		go func() {
-			down = readCount(conn, shouldStop)
+			down = readCount(conn2, shouldStop, &downBytes)
 			close(done)
 		}()
-		up := pacedUpload(conn, t.UpMbps, shouldStop)
+		up = pacedUpload(conn, t.UpMbps, shouldStop, &upBytes)
 		<-done
+
 		if atomic.LoadInt32(&stopFlag) == 1 {
-			return up, down, "stopped"
+			finalStatus = "stopped"
+		} else {
+			finalStatus = "done"
 		}
-		return up, down, "done"
 	default:
 		return 0, 0, "failed"
 	}
+
+	return up, down, finalStatus
 }
 
-func pacedUpload(w io.Writer, mbps int, stop func() bool) int64 {
+// pacedUpload sends random data at mbps rate, counting bytes into counter.
+func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 {
 	if mbps <= 0 {
 		return 0
 	}
@@ -316,6 +387,7 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool) int64 {
 				return total
 			}
 			total += int64(wr)
+			atomic.AddInt64(counter, int64(wr))
 			left -= int64(wr)
 		}
 		<-tk.C
@@ -323,19 +395,25 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool) int64 {
 	return total
 }
 
-func readCount(conn net.Conn, stop func() bool) int64 {
+// readCount reads and discards data, counting bytes into counter.
+// Uses a generous read deadline to avoid premature timeout.
+func readCount(conn net.Conn, stop func() bool, counter *int64) int64 {
 	buf := make([]byte, 64*1024)
 	var total int64
 	for !stop() {
-		_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		// 3-second deadline: if server is writing at any reasonable rate we'll get data
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		n, err := conn.Read(buf)
 		if n > 0 {
 			total += int64(n)
-		}
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			continue
+			atomic.AddInt64(counter, int64(n))
 		}
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				// timeout just means no data this window, keep going
+				continue
+			}
+			// real error (EOF, connection reset, etc.) — exit
 			return total
 		}
 	}

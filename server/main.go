@@ -31,7 +31,7 @@ type Config struct {
 	AdminUser  string
 	AdminPass  string
 	DBPath     string
-	PanelPath  string // e.g. /console-8f29c4a1
+	PanelPath  string
 }
 
 type Client struct {
@@ -76,6 +76,14 @@ type ResultReq struct {
 	ClientToken   string `json:"client_token"`
 	TaskID        string `json:"task_id"`
 	Status        string `json:"status"`
+	UploadBytes   int64  `json:"upload_bytes"`
+	DownloadBytes int64  `json:"download_bytes"`
+}
+
+type ProgressReq struct {
+	ClientID      string `json:"client_id"`
+	ClientToken   string `json:"client_token"`
+	TaskID        string `json:"task_id"`
 	UploadBytes   int64  `json:"upload_bytes"`
 	DownloadBytes int64  `json:"download_bytes"`
 }
@@ -164,6 +172,10 @@ func main() {
 	mux.HandleFunc("/api/task/next", jsonHandler(handleNextTask(cfg, db, broker)))
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
+	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
+
+	// /api/data: returns clients+tasks JSON for frontend polling (no auth needed beyond being on same panel)
+	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
 
 	p := cfg.PanelPath
 	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
@@ -173,7 +185,6 @@ func main() {
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 
-	// legacy /admin redirect if path changed
 	if p != "/admin" {
 		mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, p, http.StatusFound)
@@ -204,7 +215,6 @@ func mustInitDB(path string) *sql.DB {
 			remote_ip TEXT NOT NULL DEFAULT '',
 			current_task TEXT NOT NULL DEFAULT ''
 		);`,
-		// migrate: add remark if missing
 		`ALTER TABLE clients ADD COLUMN remark TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
@@ -224,7 +234,6 @@ func mustInitDB(path string) *sql.DB {
 
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
-			// ignore "duplicate column" for ALTER TABLE
 			if !strings.Contains(err.Error(), "duplicate column") {
 				log.Printf("db init warn: %v", err)
 			}
@@ -275,14 +284,24 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 		return
 	}
 
+	// clear per-connection deadline now that handshake is done
+	_ = conn.SetDeadline(time.Time{})
+
 	deadline := time.Now().Add(time.Duration(duration) * time.Second)
 
-	switch mode {
+	// resolve effective mode from hello (both mode client opens two connections)
+	effMode := hello.Mode
+	if effMode == "" {
+		effMode = mode
+	}
+
+	switch effMode {
 	case "upload":
 		readDiscardLoop(conn, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
 	case "download":
 		_ = pacedWrite(conn, downMbps, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
 	case "both":
+		// legacy single-conn both: server reads and writes same conn
 		done := make(chan struct{})
 		go func() {
 			readDiscardLoop(conn, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
@@ -296,7 +315,7 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 func readDiscardLoop(conn net.Conn, deadline time.Time, keep func() bool) {
 	buf := make([]byte, 64*1024)
 	for time.Now().Before(deadline) && keep() {
-		_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, err := conn.Read(buf)
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			continue
@@ -528,7 +547,106 @@ func handleTaskControl(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// durationToSec converts value+unit to seconds
+func handleTaskProgress(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req ProgressReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		var token, status string
+		err := db.QueryRow(`
+			SELECT c.token, t.status
+			FROM clients c
+			JOIN tasks t ON c.id=t.client_id
+			WHERE c.id=? AND t.id=?`,
+			req.ClientID, req.TaskID).
+			Scan(&token, &status)
+		if err != nil || token != req.ClientToken {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		if status != "running" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
+			return
+		}
+
+		_, _ = db.Exec(`UPDATE tasks SET upload_bytes=?, download_bytes=? WHERE id=?`,
+			req.UploadBytes, req.DownloadBytes, req.TaskID)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+}
+
+// handleAPIData returns clients and tasks as JSON for frontend polling.
+func handleAPIData(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clients := mustClients(db)
+		tasks := mustTasks(db)
+
+		type clientJSON struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Remark      string `json:"remark"`
+			Approved    bool   `json:"approved"`
+			LastSeen    string `json:"last_seen"`
+			RemoteIP    string `json:"remote_ip"`
+			CurrentTask string `json:"current_task"`
+		}
+		type taskJSON struct {
+			ID            string  `json:"id"`
+			ClientID      string  `json:"client_id"`
+			ClientName    string  `json:"client_name"`
+			Mode          string  `json:"mode"`
+			UpMbps        int     `json:"up_mbps"`
+			DownMbps      int     `json:"down_mbps"`
+			DurationSec   int     `json:"duration_sec"`
+			Status        string  `json:"status"`
+			StartedAt     string  `json:"started_at"`
+			FinishedAt    string  `json:"finished_at"`
+			UploadGB      float64 `json:"upload_gb"`
+			DownloadGB    float64 `json:"download_gb"`
+		}
+
+		clientNames := map[string]string{}
+		for _, c := range clients {
+			clientNames[c.ID] = c.Name
+		}
+
+		cj := make([]clientJSON, 0, len(clients))
+		for _, c := range clients {
+			cj = append(cj, clientJSON{
+				ID: c.ID, Name: c.Name, Remark: c.Remark,
+				Approved: c.Approved, LastSeen: c.LastSeen,
+				RemoteIP: c.RemoteIP, CurrentTask: c.CurrentTask,
+			})
+		}
+
+		tj := make([]taskJSON, 0, len(tasks))
+		for _, t := range tasks {
+			tj = append(tj, taskJSON{
+				ID: t.ID, ClientID: t.ClientID,
+				ClientName:  clientNames[t.ClientID],
+				Mode:        t.Mode,
+				UpMbps:      t.UpMbps,
+				DownMbps:    t.DownMbps,
+				DurationSec: t.DurationSec,
+				Status:      t.Status,
+				StartedAt:   t.StartedAt,
+				FinishedAt:  t.FinishedAt,
+				UploadGB:    float64(t.UploadBytes) / (1024 * 1024 * 1024),
+				DownloadGB:  float64(t.DownloadBytes) / (1024 * 1024 * 1024),
+			})
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"clients": cj,
+			"tasks":   tj,
+		})
+	}
+}
+
 func durationToSec(val int, unit string) int {
 	switch unit {
 	case "min":
@@ -539,7 +657,7 @@ func durationToSec(val int, unit string) int {
 		return val * 86400
 	case "month":
 		return val * 86400 * 30
-	default: // sec
+	default:
 		return val
 	}
 }
@@ -549,24 +667,32 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 		clients := mustClients(db)
 		tasks := mustTasks(db)
 
-		type pageData struct {
-			Clients       []Client
-			Tasks         []Task
-			ApprovedIDs   []string
-			DefaultClient string
-			PanelPath     string
-			ServerHost    string
-			InitToken     string
-			Version       string
+		type approvedClient struct {
+			ID   string
+			Name string
 		}
 
-		var approvedIDs []string
-		defaultClient := ""
+		type pageData struct {
+			Clients         []Client
+			Tasks           []Task
+			ApprovedClients []approvedClient
+			DefaultClientID string
+			ClientNames     map[string]string
+			PanelPath       string
+			ServerHost      string
+			InitToken       string
+			Version         string
+		}
+
+		var approvedClients []approvedClient
+		defaultClientID := ""
+		clientNames := map[string]string{}
 		for _, c := range clients {
+			clientNames[c.ID] = c.Name
 			if c.Approved {
-				approvedIDs = append(approvedIDs, c.ID)
-				if defaultClient == "" {
-					defaultClient = c.ID
+				approvedClients = append(approvedClients, approvedClient{ID: c.ID, Name: c.Name})
+				if defaultClientID == "" {
+					defaultClientID = c.ID
 				}
 			}
 		}
@@ -625,18 +751,17 @@ textarea{resize:vertical;min-height:60px}
   <p>客户端管理、任务下发和实时状态查看。</p>
   <div class="toolbar">
     <button type="button" onclick="location.reload()">手动刷新</button>
-    <span id="liveStatus" class="note">实时消息已连接，收到更新时提示，不自动整页刷新。</span>
+    <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
   </div>
 </div>
 
 <div class="card">
   <h2>客户端列表</h2>
-  <div class="tbl">
+  <div class="tbl" id="clientTableWrap">
   <table>
-    <tr><th>ID</th><th>名称</th><th>备注</th><th>已批准</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr>
+    <tr><th>名称</th><th>备注</th><th>已批准</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr>
     {{range .Clients}}
     <tr>
-      <td style="font-family:monospace;font-size:12px">{{.ID}}</td>
       <td>{{.Name}}</td>
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
@@ -661,7 +786,6 @@ textarea{resize:vertical;min-height:60px}
   <div class="tip">创建任务前请确认客户端已批准。</div>
 </div>
 
-<!-- 编辑客户端弹窗 -->
 <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center">
   <div class="card" style="width:min(480px,95vw);margin:0">
     <h2>编辑客户端</h2>
@@ -688,9 +812,12 @@ textarea{resize:vertical;min-height:60px}
   <form method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
-        <label class="note">客户端 ID</label>
-        <input list="clientList" id="client_id" name="client_id" placeholder="客户端 ID" value="{{.DefaultClient}}" required style="margin-top:4px">
-        <datalist id="clientList">{{range .ApprovedIDs}}<option value="{{.}}">{{end}}</datalist>
+        <label class="note">选择客户端</label>
+        <select id="client_id" name="client_id" required style="margin-top:4px">
+          {{range .ApprovedClients}}
+          <option value="{{.ID}}" {{if eq .ID $.DefaultClientID}}selected{{end}}>{{.Name}}</option>
+          {{end}}
+        </select>
       </div>
       <div>
         <label class="note">模式</label>
@@ -756,21 +883,21 @@ textarea{resize:vertical;min-height:60px}
 </div>
 
 <div class="card">
-  <h2>任务列表</h2>
+  <h2>任务列表 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
-  <table>
-    <tr><th>ID</th><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>上传字节</th><th>下载字节</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr>
+  <table id="taskTable">
+    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
+    <tbody id="taskBody">
     {{range .Tasks}}
-    <tr>
-      <td style="font-family:monospace;font-size:11px">{{.ID}}</td>
-      <td style="font-family:monospace;font-size:11px">{{.ClientID}}</td>
+    <tr data-task-id="{{.ID}}">
+      <td>{{index $.ClientNames .ClientID}}</td>
       <td>{{.Mode}}</td>
       <td>{{.UpMbps}}</td>
       <td>{{.DownMbps}}</td>
       <td>{{.DurationSec}} 秒</td>
       <td><span class="badge {{.Status}}">{{.Status}}</span></td>
-      <td>{{.UploadBytes}}</td>
-      <td>{{.DownloadBytes}}</td>
+      <td class="up-col">-</td>
+      <td class="down-col">-</td>
       <td>{{.StartedAt}}</td>
       <td>{{.FinishedAt}}</td>
       <td>
@@ -783,11 +910,12 @@ textarea{resize:vertical;min-height:60px}
       </td>
     </tr>
     {{end}}
+    </tbody>
   </table>
   </div>
 </div>
 
-</div><!-- wrap -->
+</div>
 
 <script>
 const PANEL_PATH = "{{.PanelPath}}";
@@ -795,13 +923,54 @@ const SERVER_HOST = "{{.ServerHost}}";
 const INIT_TOKEN  = "{{.InitToken}}";
 const PANEL_ADDR  = location.host;
 
+function fmtGB(gb) {
+  if (gb < 0.001) return '0.00 GB';
+  return gb.toFixed(3) + ' GB';
+}
+
+// Poll /api/data every 5 seconds and update task rows + client table
+function pollData() {
+  fetch('/api/data')
+    .then(r => r.json())
+    .then(data => {
+      // update task rows
+      const tasks = data.tasks || [];
+      tasks.forEach(t => {
+        const row = document.querySelector('[data-task-id="' + t.id + '"]');
+        if (!row) return;
+        const upCol = row.querySelector('.up-col');
+        const dnCol = row.querySelector('.down-col');
+        if (upCol) upCol.textContent = fmtGB(t.upload_gb);
+        if (dnCol) dnCol.textContent = fmtGB(t.download_gb);
+        // update badge
+        const badge = row.querySelector('.badge');
+        if (badge) {
+          badge.className = 'badge ' + t.status;
+          badge.textContent = t.status;
+        }
+      });
+      // update hint
+      const hint = document.getElementById('taskRefreshHint');
+      if (hint) hint.textContent = '(上次刷新: ' + new Date().toLocaleTimeString() + ')';
+
+      // update client last_seen every 60s via same data (refresh client table every 60s)
+    })
+    .catch(() => {});
+}
+
+setInterval(pollData, 5000);
+pollData();
+
+// SSE for notifications
 const es = new EventSource(PANEL_PATH + '/events');
 const liveStatus = document.getElementById('liveStatus');
-es.onmessage = function() {
-  if (liveStatus) liveStatus.textContent = '有新状态更新，点"手动刷新"查看最新内容。';
+es.onmessage = function(e) {
+  if (e.data !== 'ping' && e.data !== 'ready') {
+    if (liveStatus) liveStatus.textContent = '检测到状态变化，数据将在下次轮询时自动更新。';
+  }
 };
 es.onerror = function() {
-  if (liveStatus) liveStatus.textContent = '实时消息流异常，可手动刷新。';
+  if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
 function openEdit(id, name, remark) {
@@ -842,16 +1011,23 @@ function copyCmd() {
 
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
 			"not": func(b bool) bool { return !b },
+			"index": func(m map[string]string, k string) string {
+				if v, ok := m[k]; ok {
+					return v
+				}
+				return k
+			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
-			Clients:       clients,
-			Tasks:         tasks,
-			ApprovedIDs:   approvedIDs,
-			DefaultClient: defaultClient,
-			PanelPath:     cfg.PanelPath,
-			ServerHost:    cfg.ServerHost,
-			InitToken:     cfg.InitToken,
-			Version:       version,
+			Clients:         clients,
+			Tasks:           tasks,
+			ApprovedClients: approvedClients,
+			DefaultClientID: defaultClientID,
+			ClientNames:     clientNames,
+			PanelPath:       cfg.PanelPath,
+			ServerHost:      cfg.ServerHost,
+			InitToken:       cfg.InitToken,
+			Version:         version,
 		})
 	}
 }
