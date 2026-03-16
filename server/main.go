@@ -823,25 +823,27 @@ button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
   <h2>⚙️ 系统操作</h2>
   <p style="font-size:13px;color:#6b7280;margin-bottom:14px">重启服务后面板约1秒内不可访问，会自动恢复。</p>
   <div class="toolbar">
-    <button class="danger" onclick="restartServer()">🔄 重启 bwpanel 服务</button>
+    <button id="restartBtn" class="danger">🔄 重启 bwpanel 服务</button>
     <a class="btn sec" href="%s/settings">⚙️ Bark 设置</a>
   </div>
 </div>
 </div>
 <script>
-const PANEL_PATH = %q;
-function restartServer() {
+(function(){
+var PANEL_PATH = %q;
+document.getElementById('restartBtn').addEventListener('click', function() {
   if (!confirm('确认重启服务端？重启过程约1秒，期间面板短暂不可访问。')) return;
   fetch(PANEL_PATH + '/restart', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'}
-  }).then(() => {
+  }).then(function() {
     alert('重启指令已发出，3秒后自动刷新页面。');
-    setTimeout(() => location.reload(), 3000);
-  }).catch(() => {
-    setTimeout(() => location.reload(), 3000);
+    setTimeout(function(){ location.reload(); }, 3000);
+  }).catch(function() {
+    setTimeout(function(){ location.reload(); }, 3000);
   });
-}
+});
+})();
 </script>
 </body></html>`,
 			panelPath,
@@ -874,6 +876,10 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			InitToken       string
 			Version         string
 			BarkURL         string
+			// JS 安全输出用（已经过 json.Marshal，可直接嵌入 <script>）
+			PanelPathJS template.JS
+			InitTokenJS template.JS
+			VersionJS   template.JS
 		}
 
 		var approvedClients []approvedClient
@@ -899,6 +905,11 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 		}
 
 		version := getenv("BWPANEL_VERSION", "latest")
+
+		jsStr := func(s string) template.JS {
+			b, _ := json.Marshal(s)
+			return template.JS(b)
+		}
 
 		const page = `<!doctype html>
 <html lang="zh-CN">
@@ -1182,13 +1193,13 @@ textarea{resize:vertical;min-height:60px}
 
 <script>
 (function(){
-const PANEL_PATH = {{.PanelPath | js}};
-const INIT_TOKEN  = {{.InitToken | js}};
-const PANEL_ADDR  = location.host;
-const VERSION     = {{.Version | js}};
+var PANEL_PATH = {{.PanelPathJS}};
+var INIT_TOKEN  = {{.InitTokenJS}};
+var PANEL_ADDR  = location.host;
+var VERSION     = {{.VersionJS}};
 
-const clientNameMap = {};
-document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
+var clientNameMap = {};
+document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
   clientNameMap[row.dataset.clientId] = row.dataset.name || row.dataset.clientId;
 });
 
@@ -1198,7 +1209,7 @@ function fmtGB(bytes) {
 }
 function calcPing(lastSeen) {
   if (!lastSeen) return null;
-  const t = new Date(lastSeen);
+  var t = new Date(lastSeen);
   if (isNaN(t)) return null;
   return Math.floor((Date.now() - t.getTime()) / 1000);
 }
@@ -1209,11 +1220,11 @@ function renderPing(sec) {
   return { text: sec + 's ⚠', cls: 'ping-dead' };
 }
 function tickPing() {
-  document.querySelectorAll('#clientBody tr[data-client-id]').forEach(row => {
-    const cell = row.querySelector('.ping-col');
+  document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
+    var cell = row.querySelector('.ping-col');
     if (!cell) return;
-    const sec = calcPing(row.dataset.lastSeen);
-    const r = renderPing(sec);
+    var sec = calcPing(row.dataset.lastSeen);
+    var r = renderPing(sec);
     cell.textContent = r.text;
     cell.className = 'ping-col ' + r.cls;
   });
@@ -1221,11 +1232,11 @@ function tickPing() {
 setInterval(tickPing, 1000);
 tickPing();
 
-const knownTaskStatus = {};
+var knownTaskStatus = {};
 
 function buildRunningRow(t) {
-  const name = clientNameMap[t.client_id] || t.client_name || t.client_id;
-  const stopBtn = t.status === 'running'
+  var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
+  var stopBtn = t.status === 'running'
     ? '<form class="inline" method="post" action="' + PANEL_PATH + '/task/stop"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger">停止</button></form>'
     : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
@@ -1240,7 +1251,7 @@ function buildRunningRow(t) {
 }
 
 function buildHistoryRow(t) {
-  const name = clientNameMap[t.client_id] || t.client_name || t.client_id;
+  var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   return '<tr data-task-id="' + t.id + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
     + '<td>' + t.duration_sec + ' 秒</td>'
@@ -1255,80 +1266,80 @@ function buildHistoryRow(t) {
 
 function pollData() {
   fetch('/api/data')
-    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(data => {
-      const tasks = data.tasks || [];
-      const runningStatuses = ['running', 'pending', 'stopping'];
-      const runningTasks = tasks.filter(t => runningStatuses.includes(t.status));
-      const historyTasks = tasks.filter(t => !runningStatuses.includes(t.status));
+    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(data) {
+      var tasks = data.tasks || [];
+      var runningStatuses = ['running', 'pending', 'stopping'];
+      var runningTasks = tasks.filter(function(t) { return runningStatuses.indexOf(t.status) !== -1; });
+      var historyTasks = tasks.filter(function(t) { return runningStatuses.indexOf(t.status) === -1; });
 
-      let needFullRefresh = false;
-      tasks.forEach(t => {
-        const prev = knownTaskStatus[t.id];
+      var needFullRefresh = false;
+      tasks.forEach(function(t) {
+        var prev = knownTaskStatus[t.id];
         if (prev !== undefined && prev !== t.status) {
-          if (runningStatuses.includes(prev) !== runningStatuses.includes(t.status)) {
+          if ((runningStatuses.indexOf(prev) !== -1) !== (runningStatuses.indexOf(t.status) !== -1)) {
             needFullRefresh = true;
           }
         }
         knownTaskStatus[t.id] = t.status;
       });
-      runningTasks.forEach(t => {
+      runningTasks.forEach(function(t) {
         if (!document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
       });
-      historyTasks.forEach(t => {
+      historyTasks.forEach(function(t) {
         if (!document.querySelector('#historyTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
       });
 
       if (needFullRefresh) {
-        const rb = document.getElementById('runningTaskBody');
+        var rb = document.getElementById('runningTaskBody');
         if (rb) rb.innerHTML = runningTasks.length === 0
           ? '<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
           : runningTasks.map(buildRunningRow).join('');
-        const hb = document.getElementById('historyTaskBody');
+        var hb = document.getElementById('historyTaskBody');
         if (hb) hb.innerHTML = historyTasks.length === 0
           ? '<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>'
           : historyTasks.map(buildHistoryRow).join('');
       } else {
-        runningTasks.forEach(t => {
-          const row = document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]');
+        runningTasks.forEach(function(t) {
+          var row = document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]');
           if (!row) return;
-          const upCol = row.querySelector('.up-col');
-          const dnCol = row.querySelector('.down-col');
+          var upCol = row.querySelector('.up-col');
+          var dnCol = row.querySelector('.down-col');
           if (upCol) upCol.textContent = fmtGB(t.upload_bytes);
           if (dnCol) dnCol.textContent = fmtGB(t.download_bytes);
-          const badge = row.querySelector('.badge');
+          var badge = row.querySelector('.badge');
           if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
         });
       }
 
-      const clients = data.clients || [];
-      clients.forEach(c => {
-        const row = document.querySelector('#clientBody [data-client-id="' + c.id + '"]');
+      var clients = data.clients || [];
+      clients.forEach(function(c) {
+        var row = document.querySelector('#clientBody [data-client-id="' + c.id + '"]');
         if (!row) return;
         if (c.last_seen) row.dataset.lastSeen = c.last_seen;
-        const ctCell = row.querySelector('.curtask-col');
+        var ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
         if (c.name) clientNameMap[c.id] = c.name;
       });
       tickPing();
 
-      const hint = document.getElementById('taskRefreshHint');
+      var hint = document.getElementById('taskRefreshHint');
       if (hint) hint.textContent = '(上次刷新: ' + new Date().toLocaleTimeString() + ')';
     })
-    .catch(() => {});
+    .catch(function(){});
 }
 setInterval(pollData, 5000);
 pollData();
 
-const es = new EventSource(PANEL_PATH + '/events');
-const liveStatus = document.getElementById('liveStatus');
-es.onmessage = e => {
+var es = new EventSource(PANEL_PATH + '/events');
+var liveStatus = document.getElementById('liveStatus');
+es.onmessage = function(e) {
   if (e.data !== 'ping' && e.data !== 'ready') {
     pollData();
     if (liveStatus) liveStatus.textContent = '检测到状态变化，已立即刷新。';
   }
 };
-es.onerror = () => {
+es.onerror = function() {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
@@ -1337,7 +1348,7 @@ document.getElementById('closeEditBtn').addEventListener('click', function() {
   document.getElementById('editModal').classList.remove('open');
 });
 document.addEventListener('click', function(e) {
-  const btn = e.target.closest('.edit-btn');
+  var btn = e.target.closest('.edit-btn');
   if (!btn) return;
   document.getElementById('editID').value    = btn.dataset.id;
   document.getElementById('editName').value  = btn.dataset.name;
@@ -1350,18 +1361,18 @@ document.getElementById('closeUpgradeBtn').addEventListener('click', function() 
   document.getElementById('upgradeModal').classList.remove('open');
 });
 document.getElementById('copyUpgradeBtn').addEventListener('click', function() {
-  const el = document.getElementById('upgradeCmd');
+  var el = document.getElementById('upgradeCmd');
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
 });
 document.addEventListener('click', function(e) {
-  const btn = e.target.closest('.upgrade-btn');
+  var btn = e.target.closest('.upgrade-btn');
   if (!btn) return;
-  const clientName = btn.dataset.name || '';
-  const panelUrl   = location.protocol + '//' + PANEL_ADDR;
-  const ver        = VERSION || 'latest';
-  const cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
+  var clientName = btn.dataset.name || '';
+  var panelUrl   = location.protocol + '//' + PANEL_ADDR;
+  var ver        = VERSION || 'latest';
+  var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
     + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
     + " | bash -s -- "
     + " --server-url " + panelUrl
@@ -1374,12 +1385,12 @@ document.addEventListener('click', function(e) {
 
 // ── 生成客户端安装命令 ──
 document.getElementById('genBtn').addEventListener('click', function() {
-  const name    = document.getElementById('genName').value.trim();
-  const remark  = document.getElementById('genRemark').value.trim();
-  const version = document.getElementById('genVersion').value.trim() || 'latest';
+  var name    = document.getElementById('genName').value.trim();
+  var remark  = document.getElementById('genRemark').value.trim();
+  var version = document.getElementById('genVersion').value.trim() || 'latest';
   if (!name) { alert('请填写客户端名称'); return; }
-  const panelUrl = location.protocol + '//' + PANEL_ADDR;
-  let cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
+  var panelUrl = location.protocol + '//' + PANEL_ADDR;
+  var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
     + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --"
     + " --server-url " + panelUrl
     + " --init-token " + INIT_TOKEN
@@ -1391,7 +1402,7 @@ document.getElementById('genBtn').addEventListener('click', function() {
   document.getElementById('cmdTip').textContent = '将此命令复制到客户端 VPS 上执行即可完成安装与注册。';
 });
 document.getElementById('copyCmdBtn').addEventListener('click', function() {
-  const el = document.getElementById('cmdText');
+  var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
@@ -1401,6 +1412,7 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 </script>
 </body>
 </html>`
+
 
 
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
@@ -1413,10 +1425,6 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 			},
 			"divf": func(a int64, b float64) float64 {
 				return float64(a) / b
-			},
-			"js": func(s string) template.JS {
-				b, _ := json.Marshal(s)
-				return template.JS(b)
 			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
@@ -1431,6 +1439,9 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 			InitToken:       cfg.InitToken,
 			Version:         version,
 			BarkURL:         cfg.BarkURL,
+			PanelPathJS:     jsStr(cfg.PanelPath),
+			InitTokenJS:     jsStr(cfg.InitToken),
+			VersionJS:       jsStr(version),
 		})
 	}
 }
