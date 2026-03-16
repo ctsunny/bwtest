@@ -161,6 +161,14 @@ func barkPush(barkURL, title, body string) {
 	defer resp.Body.Close()
 }
 
+func loadBarkURL(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func main() {
 	cfg := Config{
 		PanelAddr:  getenv("PANEL_ADDR", ":8080"),
@@ -175,6 +183,10 @@ func main() {
 	}
 	if cfg.PanelPath == "" {
 		cfg.PanelPath = "/admin"
+	}
+	// 优先从持久化文件读取 BarkURL（Settings 页保存的值）
+	if saved := loadBarkURL("/opt/bwtest/bark_url"); saved != "" {
+		cfg.BarkURL = saved
 	}
 
 	db := mustInitDB(cfg.DBPath)
@@ -201,6 +213,7 @@ func main() {
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
+	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 
@@ -309,7 +322,7 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
-	deadline := time.Now().Add(time.Duration(duration) * time.Second)
+	deadline := time.Now().Add(time.Duration(hello.DurationSec) * time.Second)
 	effMode := hello.Mode
 	if effMode == "" {
 		effMode = mode
@@ -582,7 +595,6 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clients := mustClients(db)
 		tasks := mustTasks(db)
-
 		type clientJSON struct {
 			ID          string `json:"id"`
 			Name        string `json:"name"`
@@ -606,7 +618,6 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			UploadGB    float64 `json:"upload_gb"`
 			DownloadGB  float64 `json:"download_gb"`
 		}
-
 		clientNames := map[string]string{}
 		for _, c := range clients {
 			clientNames[c.ID] = c.Name
@@ -624,12 +635,11 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			tj = append(tj, taskJSON{
 				ID: t.ID, ClientID: t.ClientID,
 				ClientName:  clientNames[t.ClientID],
-				Mode:        t.Mode,
-				UpMbps:      t.UpMbps, DownMbps: t.DownMbps,
+				Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
 				DurationSec: t.DurationSec, Status: t.Status,
-				StartedAt:   t.StartedAt, FinishedAt: t.FinishedAt,
-				UploadGB:    float64(t.UploadBytes) / (1024 * 1024 * 1024),
-				DownloadGB:  float64(t.DownloadBytes) / (1024 * 1024 * 1024),
+				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
+				UploadGB:   float64(t.UploadBytes) / (1024 * 1024 * 1024),
+				DownloadGB: float64(t.DownloadBytes) / (1024 * 1024 * 1024),
 			})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"clients": cj, "tasks": tj})
@@ -662,7 +672,8 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 		}
 		type pageData struct {
 			Clients         []Client
-			Tasks           []Task
+			RunningTasks    []Task
+			HistoryTasks    []Task
 			ApprovedClients []approvedClient
 			DefaultClientID string
 			ClientNames     map[string]string
@@ -685,6 +696,16 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
+
+		var runningTasks, historyTasks []Task
+		for _, t := range tasks {
+			if t.Status == "running" || t.Status == "pending" || t.Status == "stopping" {
+				runningTasks = append(runningTasks, t)
+			} else {
+				historyTasks = append(historyTasks, t)
+			}
+		}
+
 		version := getenv("BWPANEL_VERSION", "latest")
 
 		const page = `<!doctype html>
@@ -719,13 +740,9 @@ th{background:#f9fafb;font-weight:700}
 .running{background:var(--run-bg);color:var(--run)}.done{background:var(--done-bg);color:var(--done)}
 .pending{background:var(--pend-bg);color:var(--pend)}.stopped{background:var(--warn-bg);color:var(--warn)}
 .stopping{background:var(--stop-bg);color:var(--stop)}
-.ping-ok{color:#16a34a;font-weight:700}
-.ping-warn{color:#d97706;font-weight:700}
-.ping-dead{color:#dc2626;font-weight:700}
+.ping-ok{color:#16a34a;font-weight:700}.ping-warn{color:#d97706;font-weight:700}.ping-dead{color:#dc2626;font-weight:700}
 .grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
-.dur-wrap{display:flex;gap:6px}
-.dur-wrap input{flex:1}
-.dur-wrap select{width:90px}
+.dur-wrap{display:flex;gap:6px}.dur-wrap input{flex:1}.dur-wrap select{width:90px}
 input,select,textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:9px;font-size:13px;background:#fff}
 textarea{resize:vertical;min-height:60px}
 .tip{margin-top:10px;font-size:12px;color:var(--muted)}
@@ -898,13 +915,14 @@ textarea{resize:vertical;min-height:60px}
   <div class="tip" id="cmdTip"></div>
 </div>
 
+<!-- 正在运行的任务 -->
 <div class="card">
-  <h2>任务列表 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
+  <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
-    <tbody id="taskBody">
-    {{range .Tasks}}
+    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
+    <tbody id="runningTaskBody">
+    {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}">
       <td>{{index $.ClientNames .ClientID}}</td>
       <td>{{.Mode}}</td>
@@ -915,7 +933,6 @@ textarea{resize:vertical;min-height:60px}
       <td class="up-col">-</td>
       <td class="down-col">-</td>
       <td>{{.StartedAt}}</td>
-      <td>{{.FinishedAt}}</td>
       <td>
         {{if eq .Status "running"}}
         <form class="inline" method="post" action="{{$.PanelPath}}/task/stop">
@@ -926,6 +943,40 @@ textarea{resize:vertical;min-height:60px}
       </td>
     </tr>
     {{end}}
+    {{if not .RunningTasks}}<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<!-- 历史任务 -->
+<div class="card">
+  <h2>📋 历史任务</h2>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
+    <tbody id="historyTaskBody">
+    {{range .HistoryTasks}}
+    <tr data-task-id="{{.ID}}">
+      <td>{{index $.ClientNames .ClientID}}</td>
+      <td>{{.Mode}}</td>
+      <td>{{.UpMbps}}</td>
+      <td>{{.DownMbps}}</td>
+      <td>{{.DurationSec}} 秒</td>
+      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td class="up-col">{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
+      <td class="down-col">{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
+      <td>{{.StartedAt}}</td>
+      <td>{{.FinishedAt}}</td>
+      <td>
+        <form class="inline" method="post" action="{{$.PanelPath}}/task/delete" onsubmit="return confirm('确认删除此任务记录？')">
+          <input type="hidden" name="task_id" value="{{.ID}}">
+          <button type="submit" class="danger">删除</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    {{if not .HistoryTasks}}<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
@@ -1081,10 +1132,14 @@ function copyCmd() {
 				}
 				return k
 			},
+			"divf": func(a int64, b float64) float64 {
+				return float64(a) / b
+			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
 			Clients:         clients,
-			Tasks:           tasks,
+			RunningTasks:    runningTasks,
+			HistoryTasks:    historyTasks,
 			ApprovedClients: approvedClients,
 			DefaultClientID: defaultClientID,
 			ClientNames:     clientNames,
@@ -1094,6 +1149,17 @@ function copyCmd() {
 			Version:         version,
 			BarkURL:         cfg.BarkURL,
 		})
+	}
+}
+
+func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		taskID := r.Form.Get("task_id")
+		// 只允许删除非 running 任务
+		_, _ = db.Exec(`DELETE FROM tasks WHERE id=? AND status NOT IN ('running','stopping')`, taskID)
+		broker.Publish("tasks")
+		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
 }
 
