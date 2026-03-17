@@ -242,6 +242,7 @@ func main() {
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
+	mux.Handle(p+"/gen/install-cmd", basicAuth(cfg, http.HandlerFunc(handleGenInstallCmd(p, cfg))))
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 	mux.Handle(p+"/restart", basicAuth(cfg, http.HandlerFunc(handleRestart(p))))
@@ -698,8 +699,8 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 		for _, t := range tasks {
 			tj = append(tj, taskJSON{
 				ID: t.ID, ClientID: t.ClientID,
-				ClientName:  clientNames[t.ClientID],
-				Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
+				ClientName: clientNames[t.ClientID],
+				Mode:       t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
 				DurationSec: t.DurationSec, Status: t.Status,
 				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 				UploadGB:      float64(t.UploadBytes) / (1024 * 1024 * 1024),
@@ -876,6 +877,10 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			PanelPathJS     template.JS
 			InitTokenJS     template.JS
 			VersionJS       template.JS
+			GenName         string
+			GenRemark       string
+			GenVersion      string
+			GeneratedCmd    string
 		}
 
 		var approvedClients []approvedClient
@@ -901,6 +906,13 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 		}
 
 		version := getenv("BWPANEL_VERSION", "latest")
+		genName := strings.TrimSpace(r.URL.Query().Get("gen_name"))
+		genRemark := strings.TrimSpace(r.URL.Query().Get("gen_remark"))
+		genVersion := strings.TrimSpace(r.URL.Query().Get("gen_version"))
+		generatedCmd := strings.TrimSpace(r.URL.Query().Get("gen_cmd"))
+		if genVersion == "" {
+			genVersion = version
+		}
 
 		jsStr := func(s string) template.JS {
 			b, _ := json.Marshal(s)
@@ -955,8 +967,8 @@ textarea{resize:vertical;min-height:60px}
 .copy-box{display:flex;gap:8px;align-items:center;margin-top:10px}
 .copy-box input{font-family:monospace;font-size:12px;background:#f9fafb}
 .gen-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center}
-.modal-overlay.open{display:flex}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center;pointer-events:none}
+.modal-overlay.open{display:flex;pointer-events:auto}
 .modal-inner{background:#fff;border-radius:14px;padding:22px;width:min(600px,95vw)}
 .modal-inner input{font-family:monospace;font-size:12px;background:#f9fafb}
 @media(max-width:960px){.grid{grid-template-columns:1fr 1fr}.gen-grid{grid-template-columns:1fr 1fr}}
@@ -1028,9 +1040,12 @@ textarea{resize:vertical;min-height:60px}
       <td class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
       <td>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-        {{if (not .Approved)}}
-        <button type="button" class="approve-btn" data-id="{{.ID}}">批准</button>
-        {{end}}
+	        {{if (not .Approved)}}
+	        <form method="post" action="{{$.PanelPath}}/approve" style="margin:0">
+	          <input type="hidden" name="client_id" value="{{.ID}}">
+	          <button type="submit">批准</button>
+	        </form>
+	        {{end}}
         <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
         <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级命令</button>
         </div>
@@ -1094,28 +1109,30 @@ textarea{resize:vertical;min-height:60px}
 
 <div class="card">
   <h2>生成客户端安装命令</h2>
+  <form method="post" action="{{.PanelPath}}/gen/install-cmd">
   <div class="gen-grid">
     <div>
       <label class="note">客户端名称</label>
-      <input id="genName" placeholder="例：香港-1号机" style="margin-top:4px">
+      <input id="genName" name="gen_name" value="{{.GenName}}" placeholder="例：香港-1号机" style="margin-top:4px">
     </div>
     <div>
       <label class="note">备注（可选）</label>
-      <input id="genRemark" placeholder="可选备注" style="margin-top:4px">
+      <input id="genRemark" name="gen_remark" value="{{.GenRemark}}" placeholder="可选备注" style="margin-top:4px">
     </div>
     <div>
       <label class="note">版本号</label>
-      <input id="genVersion" value="{{.Version}}" style="margin-top:4px">
+      <input id="genVersion" name="gen_version" value="{{.GenVersion}}" style="margin-top:4px">
     </div>
     <div style="align-self:end">
-      <button type="button" id="genBtn" style="width:100%">生成命令</button>
+      <button type="submit" id="genBtn" style="width:100%">生成命令</button>
     </div>
   </div>
-  <div class="copy-box" id="cmdBox" style="display:none">
-    <input id="cmdText" readonly>
+  </form>
+  <div class="copy-box" id="cmdBox" style="display:{{if .GeneratedCmd}}flex{{else}}none{{end}}">
+    <input id="cmdText" readonly value="{{.GeneratedCmd}}">
     <button type="button" class="sec" id="copyCmdBtn">复制</button>
   </div>
-  <div class="tip" id="cmdTip"></div>
+  <div class="tip" id="cmdTip">{{if .GeneratedCmd}}将此命令复制到客户端 VPS 上执行即可完成安装与注册。{{end}}</div>
 </div>
 
 <!-- 正在运行的任务 -->
@@ -1136,11 +1153,14 @@ textarea{resize:vertical;min-height:60px}
       <td class="up-col">-</td>
       <td class="down-col">-</td>
       <td>{{.StartedAt}}</td>
-      <td>
-        {{if eq .Status "running"}}
-        <button type="button" class="danger stop-btn" data-task-id="{{.ID}}">停止</button>
-        {{else}}<span class="note">-</span>{{end}}
-      </td>
+	      <td>
+	        {{if eq .Status "running"}}
+	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
+	          <input type="hidden" name="task_id" value="{{.ID}}">
+	          <button type="submit" class="danger">停止</button>
+	        </form>
+	        {{else}}<span class="note">-</span>{{end}}
+	      </td>
     </tr>
     {{end}}
     {{if (not .RunningTasks)}}<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
@@ -1168,9 +1188,12 @@ textarea{resize:vertical;min-height:60px}
       <td>{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
       <td>{{.StartedAt}}</td>
       <td>{{.FinishedAt}}</td>
-      <td>
-        <button type="button" class="danger delete-btn" data-task-id="{{.ID}}">删除</button>
-      </td>
+	      <td>
+	        <form method="post" action="{{$.PanelPath}}/task/delete" style="margin:0" onsubmit="return confirm('确认删除此任务记录？')">
+	          <input type="hidden" name="task_id" value="{{.ID}}">
+	          <button type="submit" class="danger">删除</button>
+	        </form>
+	      </td>
     </tr>
     {{end}}
     {{if (not .HistoryTasks)}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
@@ -1238,9 +1261,11 @@ var knownTaskStatus = {};
 // 动态行：停止按钮用 data-task-id + class="stop-btn"，不再内嵌 form
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
-  var stopBtn = t.status === 'running'
-    ? '<button type="button" class="danger stop-btn" data-task-id="' + t.id + '">停止</button>'
-    : '<span class="note">-</span>';
+	var stopBtn = t.status === 'running'
+	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
+	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
+	    + '<button type="submit" class="danger">停止</button></form>'
+	  : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
     + '<td>' + t.duration_sec + ' 秒</td>'
@@ -1263,8 +1288,10 @@ function buildHistoryRow(t) {
     + '<td>' + fmtGB(t.download_bytes) + '</td>'
     + '<td>' + t.started_at + '</td>'
     + '<td>' + t.finished_at + '</td>'
-    + '<td><button type="button" class="danger delete-btn" data-task-id="' + t.id + '">删除</button></td>'
-    + '</tr>';
+	  + '<td><form method="post" action="' + PANEL_PATH + '/task/delete" style="margin:0" onsubmit="return confirm(\'确认删除此任务记录？\')">'
+	  + '<input type="hidden" name="task_id" value="' + t.id + '">'
+	  + '<button type="submit" class="danger">删除</button></form></td>'
+	  + '</tr>';
 }
 
 function pollData() {
@@ -1356,66 +1383,6 @@ es.onerror = function() {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
-// ── 事件委托：停止任务 ──
-document.addEventListener('click', function(e) {
-  var btn = e.target.closest('.stop-btn');
-  if (!btn) return;
-  var taskId = btn.dataset.taskId;
-  if (!taskId) return;
-  if (!confirm('确认停止此任务？')) return;
-  btn.disabled = true;
-  btn.textContent = '停止中...';
-  apiFetch('/task/stop', 'task_id=' + encodeURIComponent(taskId))
-    .then(function(r) {
-      if (!r.ok) throw new Error(r.status);
-      pollData();
-    })
-    .catch(function(err) {
-      alert('停止失败: ' + err);
-      btn.disabled = false;
-      btn.textContent = '停止';
-    });
-});
-
-// ── 事件委托：删除任务 ──
-document.addEventListener('click', function(e) {
-  var btn = e.target.closest('.delete-btn');
-  if (!btn) return;
-  var taskId = btn.dataset.taskId;
-  if (!taskId) return;
-  if (!confirm('确认删除此任务记录？')) return;
-  btn.disabled = true;
-  apiFetch('/task/delete', 'task_id=' + encodeURIComponent(taskId))
-    .then(function(r) {
-      if (!r.ok) throw new Error(r.status);
-      pollData();
-    })
-    .catch(function(err) {
-      alert('删除失败: ' + err);
-      btn.disabled = false;
-    });
-});
-
-// ── 事件委托：批准客户端 ──
-document.addEventListener('click', function(e) {
-  var btn = e.target.closest('.approve-btn');
-  if (!btn) return;
-  var clientId = btn.dataset.id;
-  if (!clientId) return;
-  btn.disabled = true;
-  btn.textContent = '批准中...';
-  apiFetch('/approve', 'client_id=' + encodeURIComponent(clientId))
-    .then(function(r) {
-      if (!r.ok) throw new Error(r.status);
-      location.reload();
-    })
-    .catch(function(err) {
-      alert('批准失败: ' + err);
-      btn.disabled = false;
-      btn.textContent = '批准';
-    });
-});
-
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
 document.getElementById('closeEditBtn').addEventListener('click', function() {
@@ -1477,29 +1444,30 @@ document.addEventListener('click', function(e) {
   document.getElementById('upgradeModal').classList.add('open');
 });
 
-// ── 生成客户端安装命令 ──
-	document.getElementById('genBtn').addEventListener('click', function() {
-  var name    = document.getElementById('genName').value.trim();
-  var remark  = document.getElementById('genRemark').value.trim();
-  var version = document.getElementById('genVersion').value.trim() || 'latest';
-  if (!name) { alert('请填写客户端名称'); return; }
-  var panelUrl = location.protocol + '//' + PANEL_ADDR;
-  var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
-    + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --"
-    + " --server-url " + panelUrl
-    + " --init-token " + INIT_TOKEN
-    + " --client-name '" + name.replace(/'/g, "'\\''") + "'"
-    + " --version " + version;
-  if (remark) cmd += " --remark '" + remark.replace(/'/g, "'\\''") + "'";
-  document.getElementById('cmdText').value = cmd;
-  document.getElementById('cmdBox').style.display = 'flex';
-  document.getElementById('cmdTip').textContent = '将此命令复制到客户端 VPS 上执行即可完成安装与注册。';
-});
 document.getElementById('copyCmdBtn').addEventListener('click', function() {
   var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
+});
+
+function closeModalOnBackdrop(modalId) {
+  var modal = document.getElementById(modalId);
+  if (!modal) return;
+  modal.addEventListener('click', function(e) {
+    if (e.target === modal) {
+      modal.classList.remove('open');
+    }
+  });
+}
+closeModalOnBackdrop('editModal');
+closeModalOnBackdrop('upgradeModal');
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape') return;
+  var opened = document.querySelectorAll('.modal-overlay.open');
+  for (var i = 0; i < opened.length; i++) {
+    opened[i].classList.remove('open');
+  }
 });
 
 	// ── 手动刷新按钮事件监听 ──
@@ -1511,7 +1479,6 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 </script>
 </body>
 </html>`
-
 
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
 			"not": func(b bool) bool { return !b },
@@ -1540,8 +1507,49 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 			PanelPathJS:     jsStr(cfg.PanelPath),
 			InitTokenJS:     jsStr(cfg.InitToken),
 			VersionJS:       jsStr(version),
+			GenName:         genName,
+			GenRemark:       genRemark,
+			GenVersion:      genVersion,
+			GeneratedCmd:    generatedCmd,
 		})
 	}
+}
+
+func handleGenInstallCmd(panelPath string, cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		name := strings.TrimSpace(r.Form.Get("gen_name"))
+		remark := strings.TrimSpace(r.Form.Get("gen_remark"))
+		version := strings.TrimSpace(r.Form.Get("gen_version"))
+		if version == "" {
+			version = "latest"
+		}
+		q := url.Values{}
+		q.Set("gen_name", name)
+		q.Set("gen_remark", remark)
+		q.Set("gen_version", version)
+		if name != "" {
+			panelURL := fmt.Sprintf("%s://%s", requestScheme(r), r.Host)
+			cmd := "curl --proto '=https' --tlsv1.2 -fsSL " +
+				"https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --" +
+				" --server-url " + panelURL +
+				" --init-token " + cfg.InitToken +
+				" --client-name '" + strings.ReplaceAll(name, "'", "'\\''") + "'" +
+				" --version " + version
+			if remark != "" {
+				cmd += " --remark '" + strings.ReplaceAll(remark, "'", "'\\''") + "'"
+			}
+			q.Set("gen_cmd", cmd)
+		}
+		http.Redirect(w, r, panelPath+"?"+q.Encode(), http.StatusFound)
+	}
+}
+
+func requestScheme(r *http.Request) string {
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
@@ -1551,8 +1559,8 @@ func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.Handler
 		_, _ = db.Exec(`DELETE FROM tasks WHERE id=? AND status NOT IN ('running','stopping')`, taskID)
 		broker.Publish("tasks")
 		// 支持 fetch 调用（返回 JSON）和传统 form 跳转
-		if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" &&
-			r.Header.Get("Accept") == "" {
+		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			!strings.Contains(r.Header.Get("Accept"), "application/json") {
 			http.Redirect(w, r, panelPath, http.StatusFound)
 			return
 		}
@@ -1632,6 +1640,11 @@ func handleApprove(panelPath string, cfg Config, db *sql.DB, broker *Broker) htt
 		clientID := r.Form.Get("client_id")
 		_, _ = db.Exec(`UPDATE clients SET approved=1 WHERE id=?`, clientID)
 		broker.Publish("clients")
+		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			!strings.Contains(r.Header.Get("Accept"), "application/json") {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
@@ -1689,6 +1702,11 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 		taskID := r.Form.Get("task_id")
 		_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=? AND status='running'`, taskID)
 		broker.Publish("tasks")
+		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			!strings.Contains(r.Header.Get("Accept"), "application/json") {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
