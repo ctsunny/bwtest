@@ -247,6 +247,7 @@ func main() {
 	mux.Handle(p+"/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(p, cfg, db, broker))))
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
 	mux.Handle(p+"/client/upgrade", basicAuth(cfg, http.HandlerFunc(handlePushUpgrade(p, db))))
+	mux.Handle(p+"/client/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteClient(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
@@ -1082,7 +1083,7 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
       <td class="ping-col">-</td>
-      <td class="lastseen-col">{{.LastSeen}}</td>
+      <td class="lastseen-col">{{.LastSeen | shortTime}}</td>
       <td>{{.RemoteIP}}</td>
       <td class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
       <td>
@@ -1096,6 +1097,10 @@ textarea{resize:vertical;min-height:60px}
         <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
         <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级命令</button>
         <button type="button" class="warn push-upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">推送更新</button>
+        <form method="post" action="{{$.PanelPath}}/client/delete" style="margin:0;display:inline-block" onsubmit="return confirm('确认删除此客户端？');">
+          <input type="hidden" name="client_id" value="{{.ID}}">
+          <button type="submit" class="danger">删除</button>
+        </form>
         </div>
       </td>
     </tr>
@@ -1201,7 +1206,7 @@ textarea{resize:vertical;min-height:60px}
       <td class="rtt-col" data-client-id="{{.ClientID}}">-</td>
       <td class="up-col">-</td>
       <td class="down-col">-</td>
-      <td>{{.StartedAt}}</td>
+      <td>{{.StartedAt | shortTime}}</td>
 	      <td>
 	        {{if eq .Status "running"}}
 	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
@@ -1240,8 +1245,8 @@ textarea{resize:vertical;min-height:60px}
       <td><span class="badge {{.Status}}">{{.Status}}</span></td>
       <td>{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
       <td>{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
-      <td>{{.StartedAt}}</td>
-      <td>{{.FinishedAt}}</td>
+      <td>{{.StartedAt | shortTime}}</td>
+      <td>{{.FinishedAt | shortTime}}</td>
 	      <td>
 	        <form method="post" action="{{$.PanelPath}}/task/delete" style="margin:0" onsubmit="return confirm('确认删除此任务记录？')">
 	          <input type="hidden" name="task_id" value="{{.ID}}">
@@ -1329,6 +1334,15 @@ tickPing();
 
 var knownTaskStatus = {};
 
+function fmtShortTime(s) {
+  if (!s) return '';
+  var parts = s.split(/[-T:+]/);
+  if (parts.length >= 5) {
+    return parts[1] + '-' + parts[2] + ' ' + parts[3] + ':' + parts[4];
+  }
+  return s;
+}
+
 // 动态行：停止按钮输出为 form，保证无 JS 也可提交
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
@@ -1348,7 +1362,7 @@ function buildRunningRow(t) {
     + '<td class="rtt-col" data-client-id="' + t.client_id + '">-</td>'
     + '<td class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
     + '<td class="down-col">' + fmtGB(t.download_bytes) + '</td>'
-    + '<td>' + t.started_at + '</td>'
+    + '<td>' + fmtShortTime(t.started_at) + '</td>'
     + '<td>' + stopBtn + '</td>'
     + '</tr>';
 }
@@ -1362,8 +1376,8 @@ function buildHistoryRow(t) {
     + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
     + '<td>' + fmtGB(t.upload_bytes) + '</td>'
     + '<td>' + fmtGB(t.download_bytes) + '</td>'
-    + '<td>' + t.started_at + '</td>'
-    + '<td>' + t.finished_at + '</td>'
+    + '<td>' + fmtShortTime(t.started_at) + '</td>'
+    + '<td>' + fmtShortTime(t.finished_at) + '</td>'
 	  + '<td><form method="post" action="' + PANEL_PATH + '/task/delete" style="margin:0" onsubmit="return confirm(\'确认删除此任务记录？\')">'
 	  + '<input type="hidden" name="task_id" value="' + t.id + '">'
 	  + '<button type="submit" class="danger">删除</button></form></td>'
@@ -1449,7 +1463,11 @@ function pollData() {
       clients.forEach(function(c) {
         var row = document.querySelector('#clientBody [data-client-id="' + c.id + '"]');
         if (!row) return;
-        if (c.last_seen) row.dataset.lastSeen = c.last_seen;
+        if (c.last_seen) {
+          row.dataset.lastSeen = c.last_seen;
+          var lsCol = row.querySelector('.lastseen-col');
+          if (lsCol) lsCol.textContent = fmtShortTime(c.last_seen);
+        }
         var ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
         if (c.name) clientNameMap[c.id] = c.name;
@@ -1627,6 +1645,17 @@ if (toggleHistoryBtnEl) toggleHistoryBtnEl.addEventListener('click', function() 
 			},
 			"divf": func(a int64, b float64) float64 {
 				return float64(a) / b
+			},
+			"shortTime": func(s string) string {
+				if s == "" {
+					return ""
+				}
+				t, err := time.Parse(time.RFC3339, s)
+				if err != nil {
+					return s
+				}
+				loc := time.FixedZone("CST", 8*3600)
+				return t.In(loc).Format("01-02 15:04")
 			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
@@ -1880,6 +1909,22 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 		_, _ = db.Exec(`UPDATE clients SET upgrade_to=? WHERE id=?`, version, clientID)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": version})
+	}
+}
+
+func handleDeleteClient(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		clientID := r.Form.Get("client_id")
+		_, _ = db.Exec(`DELETE FROM clients WHERE id=?`, clientID)
+		broker.Publish("clients")
+		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			!strings.Contains(r.Header.Get("Accept"), "application/json") {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
 
