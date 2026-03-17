@@ -117,7 +117,7 @@ download_binary() {
 build_from_source() {
   if ! command -v go >/dev/null 2>&1; then
     log "安装 Go 运行时..."
-    local go_ver="1.22.5" arch
+    local go_ver="1.24.5" arch
     arch="$(detect_arch)"
     curl -fsSL "https://go.dev/dl/go${go_ver}.linux-${arch}.tar.gz" | tar -C /usr/local -xz
     export PATH="/usr/local/go/bin:${PATH}"
