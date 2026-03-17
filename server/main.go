@@ -1161,6 +1161,7 @@ textarea{resize:vertical;min-height:60px}
 	        {{if eq .Status "running"}}
 	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
 	          <input type="hidden" name="task_id" value="{{.ID}}">
+	          <button type="submit" class="danger stop-btn">停止</button>
 	        </form>
 	        {{else}}<span class="note">-</span>{{end}}
 	      </td>
@@ -1225,6 +1226,11 @@ function apiFetch(path, body) {
   return fetch(PANEL_PATH + path, opts);
 }
 
+function bindClick(id, fn) {
+  var el = document.getElementById(id);
+  if (el) el.addEventListener('click', fn);
+}
+
 var clientNameMap = {};
 document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
   clientNameMap[row.dataset.clientId] = row.dataset.name || row.dataset.clientId;
@@ -1278,6 +1284,7 @@ function buildRunningRow(t) {
 	var stopBtn = t.status === 'running'
 	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
 	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
+	    + '<button type="submit" class="danger stop-btn">停止</button></form>'
 	  : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
@@ -1393,6 +1400,7 @@ function pollData() {
 setInterval(pollData, 5000);
 pollData();
 
+var es = new EventSource(PANEL_PATH + '/events');
 var liveStatus = document.getElementById('liveStatus');
 es.onmessage = function(e) {
   if (e.data !== 'ping' && e.data !== 'ready') {
@@ -1406,7 +1414,7 @@ es.onerror = function() {
 
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
-bindClick('closeEditBtn', function() {
+document.getElementById('closeEditBtn').addEventListener('click', function() {
   document.getElementById('editModal').classList.remove('open');
 });
 document.querySelectorAll('.edit-btn').forEach(function(btn) {
@@ -1417,7 +1425,7 @@ document.querySelectorAll('.edit-btn').forEach(function(btn) {
     document.getElementById('editModal').classList.add('open');
   });
 });
-bindClick('saveEditBtn', function() {
+document.getElementById('saveEditBtn').addEventListener('click', function() {
   var name   = document.getElementById('editName').value.trim();
   var remark = document.getElementById('editRemark').value.trim();
   if (!name) { alert('名称不能为空'); return; }
@@ -1465,6 +1473,7 @@ document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
   });
 });
 
+document.getElementById('copyCmdBtn').addEventListener('click', function() {
   var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
@@ -1490,6 +1499,22 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+
+// \u2500\u2500 \u624b\u52a8\u5237\u65b0\u6309\u9215\u4e8b\u4ef6\u76d1\u542c \u2500\u2500
+var reloadBtnEl = document.getElementById('reloadBtn');
+if (reloadBtnEl) reloadBtnEl.addEventListener('click', function() {
+  pollData();
+  if (liveStatus) liveStatus.textContent = '\u624b\u52a8\u5237\u65b0\u5b8c\u6210: ' + new Date().toLocaleTimeString();
+});
+
+var historyOpen = false;
+var toggleHistoryBtnEl = document.getElementById('toggleHistoryBtn');
+if (toggleHistoryBtnEl) toggleHistoryBtnEl.addEventListener('click', function() {
+  historyOpen = !historyOpen;
+  var card = document.getElementById('historyCard');
+  if (card) card.style.display = historyOpen ? 'block' : 'none';
+  this.textContent = historyOpen ? '\u9690\u85cf\u5386\u53f2\u4efb\u52a1' : '\u663e\u793a\u5386\u53f2\u4efb\u52a1';
+});
 
 })();
 </script>
