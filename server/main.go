@@ -224,7 +224,6 @@ func main() {
 
 	db := mustInitDB(cfg.DBPath)
 	broker := NewBroker()
-	resetStuckTasks(db)
 
 	log.Printf("bwtest server %s starting...", AppVersion)
 	log.Printf("panel=%s%s data=%s db=%s bark=%v",
@@ -267,17 +266,7 @@ func main() {
 }
 
 func resetStuckTasks(db *sql.DB) {
-	now := time.Now().Format(time.RFC3339)
-	res, err := db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE status IN ('running','stopping')`, now)
-	if err != nil {
-		log.Printf("resetStuckTasks: %v", err)
-		return
-	}
-	n, _ := res.RowsAffected()
-	if n > 0 {
-		log.Printf("resetStuckTasks: marked %d unfinished task(s) as stopped", n)
-	}
-	_, _ = db.Exec(`UPDATE clients SET current_task=''`)
+	// deprecated: running tasks should be preserved to allow auto-reconnect
 }
 
 func watchStuckTasks(db *sql.DB, broker *Broker) {
@@ -545,10 +534,28 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		}
 		if currentTask != "" {
 			if taskStatus(db, currentTask) == "running" {
-				w.WriteHeader(204)
-				return
+				var rt Task
+				err = db.QueryRow(`
+					SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,started_at
+					FROM tasks WHERE id=?`, currentTask).
+					Scan(&rt.ID, &rt.ClientID, &rt.Mode, &rt.UpMbps, &rt.DownMbps, &rt.DurationSec, &rt.StartedAt)
+				if err == nil && rt.StartedAt != "" {
+					started, _ := time.Parse(time.RFC3339, rt.StartedAt)
+					elapsed := int(time.Since(started).Seconds())
+					if elapsed < rt.DurationSec {
+						addr := cfg.DataAddr
+						if strings.HasPrefix(addr, ":") {
+							addr = cfg.ServerHost + addr
+						}
+						_ = json.NewEncoder(w).Encode(AssignResp{
+							ID: rt.ID, Mode: rt.Mode, UpMbps: rt.UpMbps, DownMbps: rt.DownMbps,
+							DurationSec: rt.DurationSec - elapsed, DataAddr: addr,
+						})
+						return
+					}
+				}
 			}
-			// current_task 指向非 running 的旧任务，先清空脏数据
+			// current_task 指向非 running 的旧任务或已超时，先清空脏数据
 			_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
 		}
 		var t Task

@@ -78,6 +78,30 @@ journalctl -u bwagent -f
 cat /etc/bwagent/config.json
 ```
 
+## Uninstall completely
+
+**Uninstall Server:**
+```bash
+systemctl stop bwpanel
+systemctl disable bwpanel
+rm -f /etc/systemd/system/bwpanel.service
+rm -f /usr/local/bin/bwpanel /usr/local/bin/bwpanel-menu
+rm -f /etc/default/bwpanel
+rm -rf /opt/bwtest
+systemctl daemon-reload
+```
+
+**Uninstall Client:**
+```bash
+systemctl stop bwagent
+systemctl disable bwagent
+rm -f /etc/systemd/system/bwagent.service
+rm -f /usr/local/bin/bwagent
+rm -rf /etc/bwagent
+rm -rf /opt/bwtest/client_source
+systemctl daemon-reload
+```
+
 ## Release a new version
 
 ```bash
