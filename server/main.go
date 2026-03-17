@@ -1564,7 +1564,6 @@ document.querySelector('#clientBody').addEventListener('click', function(e) {
     document.getElementById('pushUpgradeVersion').value = VERSION || 'latest';
     document.getElementById('pushUpgradeModal').classList.add('open');
   }
-  }
 });
 
 bindClick('closePushUpgradeBtn', function() {
