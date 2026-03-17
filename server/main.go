@@ -258,14 +258,15 @@ func main() {
 }
 
 func resetStuckTasks(db *sql.DB) {
-	res, err := db.Exec(`UPDATE tasks SET status='pending', started_at='' WHERE status='running'`)
+	now := time.Now().Format(time.RFC3339)
+	res, err := db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE status IN ('running','stopping')`, now)
 	if err != nil {
 		log.Printf("resetStuckTasks: %v", err)
 		return
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		log.Printf("resetStuckTasks: reset %d running task(s) to pending", n)
+		log.Printf("resetStuckTasks: marked %d unfinished task(s) as stopped", n)
 	}
 	_, _ = db.Exec(`UPDATE clients SET current_task=''`)
 }
@@ -292,9 +293,10 @@ func watchStuckTasks(db *sql.DB, broker *Broker) {
 		}
 		rows.Close()
 		for _, p := range pairs {
-			_, _ = db.Exec(`UPDATE tasks SET status='pending', started_at='' WHERE id=?`, p.tid)
+			now := time.Now().Format(time.RFC3339)
+			_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, p.tid)
 			_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, p.cid)
-			log.Printf("watchStuckTasks: reset task %s (client %s) to pending due to heartbeat timeout", p.tid, p.cid)
+			log.Printf("watchStuckTasks: mark task %s (client %s) stopped due to heartbeat timeout", p.tid, p.cid)
 		}
 		if len(pairs) > 0 {
 			broker.Publish("tasks")
@@ -1391,7 +1393,6 @@ function pollData() {
 setInterval(pollData, 5000);
 pollData();
 
-var es = new EventSource(PANEL_PATH + '/events');
 var liveStatus = document.getElementById('liveStatus');
 es.onmessage = function(e) {
   if (e.data !== 'ping' && e.data !== 'ready') {
@@ -1706,6 +1707,11 @@ func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) 
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		clientName := clientID
+		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
+		go barkPush(cfg.BarkURL, "任务已创建",
+			fmt.Sprintf("客户端 %s 新任务已创建\n模式:%s 上传:%dMbps 下载:%dMbps 时长:%ds",
+				clientName, mode, up, down, dur))
 		broker.Publish("tasks")
 		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
@@ -1715,7 +1721,18 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		taskID := r.Form.Get("task_id")
-		_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=? AND status='running'`, taskID)
+		var status, clientID string
+		_ = db.QueryRow(`SELECT status, client_id FROM tasks WHERE id=?`, taskID).Scan(&status, &clientID)
+		now := time.Now().Format(time.RFC3339)
+		switch status {
+		case "running":
+			_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=?`, taskID)
+		case "pending", "stopping":
+			_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, taskID)
+			if clientID != "" {
+				_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
+			}
+		}
 		broker.Publish("tasks")
 		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
 			!strings.Contains(r.Header.Get("Accept"), "application/json") {
