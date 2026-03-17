@@ -1158,12 +1158,11 @@ textarea{resize:vertical;min-height:60px}
       <td class="down-col">-</td>
       <td>{{.StartedAt}}</td>
 	      <td>
-		{{if or (eq .Status "running") (eq .Status "pending") (eq .Status "stopping")}}
-		<form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
-		  <input type="hidden" name="task_id" value="{{.ID}}">
-		  <button type="submit" class="danger stop-btn">取消</button>
-		</form>
-		{{else}}<span class="note">-</span>{{end}}
+	        {{if eq .Status "running"}}
+	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
+	          <input type="hidden" name="task_id" value="{{.ID}}">
+	        </form>
+	        {{else}}<span class="note">-</span>{{end}}
 	      </td>
     </tr>
     {{end}}
@@ -1276,10 +1275,9 @@ var knownTaskStatus = {};
 // 动态行：停止按钮输出为 form，保证无 JS 也可提交
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
-	var stopBtn = (t.status === 'running' || t.status === 'pending' || t.status === 'stopping')
+	var stopBtn = t.status === 'running'
 	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
 	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	    + '<button type="submit" class="danger stop-btn">取消</button></form>'
 	  : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
@@ -1365,15 +1363,14 @@ function pollData() {
           if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
           // 同步停止按钮状态：running 时显示按钮，否则隐藏
           var opCell = row.cells[row.cells.length - 1];
-	          if (opCell) {
-	            var existBtn = opCell.querySelector('.stop-btn');
-	            var canCancel = (t.status === 'running' || t.status === 'pending' || t.status === 'stopping');
-	            if (canCancel && !existBtn) {
-	              opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger stop-btn">取消</button></form>';
-	            } else if (!canCancel && existBtn) {
-	              opCell.innerHTML = '<span class="note">-</span>';
-	            }
-	          }
+          if (opCell) {
+            var existBtn = opCell.querySelector('.stop-btn');
+            if (t.status === 'running' && !existBtn) {
+              opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger stop-btn">停止</button></form>';
+            } else if (t.status !== 'running' && existBtn) {
+              opCell.innerHTML = '<span class="note">-</span>';
+            }
+          }
         });
       }
 
@@ -1397,26 +1394,15 @@ setInterval(pollData, 5000);
 pollData();
 
 var liveStatus = document.getElementById('liveStatus');
-if (window.EventSource) {
-  var es = new EventSource(PANEL_PATH + '/events');
-  es.onmessage = function(e) {
-    if (e.data !== 'ping' && e.data !== 'ready') {
-      pollData();
-      if (liveStatus) liveStatus.textContent = '检测到状态变化，已立即刷新。';
-    }
-  };
-  es.onerror = function() {
-    if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
-  };
-} else if (liveStatus) {
-  liveStatus.textContent = '当前浏览器不支持实时消息流，仍会每 5 秒自动刷新数据。';
-}
-
-function bindClick(id, handler) {
-  var el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener('click', handler);
-}
+es.onmessage = function(e) {
+  if (e.data !== 'ping' && e.data !== 'ready') {
+    pollData();
+    if (liveStatus) liveStatus.textContent = '检测到状态变化，已立即刷新。';
+  }
+};
+es.onerror = function() {
+  if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
+};
 
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
@@ -1479,7 +1465,6 @@ document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
   });
 });
 
-bindClick('copyCmdBtn', function() {
   var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
@@ -1505,20 +1490,6 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-		// ── 手动刷新按钮事件监听 ──
-		bindClick('reloadBtn', function() {
-			pollData();
-			if (liveStatus) liveStatus.textContent = '手动刷新完成: ' + new Date().toLocaleTimeString();
-		});
-
-    var historyOpen = false;
-		bindClick('toggleHistoryBtn', function() {
-      historyOpen = !historyOpen;
-      var card = document.getElementById('historyCard');
-      if (!card) return;
-      card.style.display = historyOpen ? 'block' : 'none';
-      this.textContent = historyOpen ? '隐藏历史任务' : '显示历史任务';
-    });
 
 })();
 </script>
@@ -1685,9 +1656,6 @@ func handleApprove(panelPath string, cfg Config, db *sql.DB, broker *Broker) htt
 		clientID := r.Form.Get("client_id")
 		_, _ = db.Exec(`UPDATE clients SET approved=1 WHERE id=?`, clientID)
 		broker.Publish("clients")
-		clientName := clientID
-		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
-		go barkPush(cfg.BarkURL, "客户端已批准", fmt.Sprintf("客户端 %s 已通过审批", clientName))
 		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
 			!strings.Contains(r.Header.Get("Accept"), "application/json") {
 			http.Redirect(w, r, panelPath, http.StatusFound)
