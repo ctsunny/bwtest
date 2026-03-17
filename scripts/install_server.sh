@@ -21,7 +21,6 @@ warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 err()  { echo -e "${RED}[ERR ]${RESET} $*" >&2; }
 title(){ echo -e "\n${CYAN}$*${RESET}"; }
 
-# 不依赖 xxd/openssl，纯 shell 实现随机 hex 字符串
 rand_hex() {
   local n=${1:-16}
   if command -v openssl >/dev/null 2>&1; then
@@ -70,7 +69,6 @@ install_deps() {
   fi
 }
 
-# 读取文件头 4 字节判断是否 ELF 二进制，不依赖 file 命令
 is_elf() {
   local magic
   magic=$(od -An -N4 -tx1 "$1" 2>/dev/null | tr -d ' \n')
@@ -336,9 +334,14 @@ do_set_bark() {
   title "=== 配置 Bark 推送 ==="
   local current_bark
   current_bark=$(grep BARK_URL "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "未配置")
-  echo "当前 Bark URL: ${current_bark}"
-  echo -e "格式示例: ${CYAN}https://api.day.app/你的token${RESET}"
-  read -rp "新 Bark URL [回车删除配置]: " NEW_BARK
+  echo "当前 Bark Token: ${current_bark}"
+  echo -e "只需填写 Token 部分，例如: ${CYAN}abc123xyz${RESET}"
+  echo -e "对应推送地址将自动拼接为: https://api.day.app/<token>"
+  read -rp "新 Bark Token [回车删除配置]: " NEW_TOKEN_BARK
+  local NEW_BARK=""
+  if [[ -n "${NEW_TOKEN_BARK}" ]]; then
+    NEW_BARK="https://api.day.app/${NEW_TOKEN_BARK}"
+  fi
   mkdir -p "${INSTALL_DIR}"
   echo "${NEW_BARK}" > "${INSTALL_DIR}/bark_url"
   if grep -q '^BARK_URL=' "${ENV_FILE}" 2>/dev/null; then
@@ -348,7 +351,7 @@ do_set_bark() {
   fi
   systemctl restart "${BIN_NAME}"
   if [[ -n "${NEW_BARK}" ]]; then
-    log "Bark 已配置并生效"
+    log "Bark 已配置: ${NEW_BARK}"
   else
     log "Bark 已关闭"
   fi
@@ -369,6 +372,47 @@ do_restart() {
   sleep 1
   systemctl status "${BIN_NAME}" --no-pager -l
   log "服务已重启"
+}
+
+do_gen_client_cmd() {
+  title "=== 生成客户端安装命令 ==="
+  [[ -f "${ENV_FILE}" ]] || { err "服务端未安装，请先安装"; return; }
+
+  local server_host panel_port panel_path init_token version
+  server_host=$(grep SERVER_HOST "${ENV_FILE}" | cut -d= -f2)
+  panel_port=$(grep PANEL_ADDR  "${ENV_FILE}" | cut -d= -f2 | tr -d ':')
+  panel_path=$(grep PANEL_PATH  "${ENV_FILE}" | cut -d= -f2)
+  init_token=$(grep INIT_TOKEN  "${ENV_FILE}" | cut -d= -f2)
+  version=$(grep BWPANEL_VERSION "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "latest")
+
+  local panel_url="http://${server_host}:${panel_port}"
+
+  read -rp "客户端名称（必填，例: 香港-1号机）: " CLIENT_NAME
+  if [[ -z "${CLIENT_NAME}" ]]; then
+    err "名称不能为空"
+    return
+  fi
+  read -rp "备注（可选，直接回车跳过）: " CLIENT_REMARK
+  read -rp "版本号 [回车使用当前版本 ${version}]: " CLIENT_VER
+  CLIENT_VER=${CLIENT_VER:-${version}}
+
+  local cmd
+  cmd="curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install_client.sh | bash -s --"
+  cmd+=" --server-url ${panel_url}"
+  cmd+=" --init-token '${init_token}'"
+  cmd+=" --client-name '${CLIENT_NAME}'"
+  cmd+=" --version ${CLIENT_VER}"
+  [[ -n "${CLIENT_REMARK}" ]] && cmd+=" --remark '${CLIENT_REMARK}'"
+
+  echo
+  echo -e "${CYAN}======= 客户端安装命令（复制到目标 VPS 执行）=======${RESET}"
+  echo
+  echo "${cmd}"
+  echo
+  echo -e "${CYAN}====================================================${RESET}"
+  echo -e "${GREEN}[提示]${RESET} 在目标 VPS 上以 root 权限运行以上命令即可完成安装和注册。"
+  echo -e "${GREEN}[提示]${RESET} 安装后需到 Web 面板批准该客户端，才能下发测速任务。"
+  echo
 }
 
 do_uninstall() {
@@ -404,9 +448,10 @@ menu() {
     echo "  8. 查看服务状态与日志"
     echo "  9. 重启服务"
     echo " 10. 完整卸载"
+    echo " 11. 生成客户端安装命令"
     echo "  0. 退出"
     echo -e "${CYAN}====================================${RESET}"
-    read -rp "请选择操作 [0-10]: " choice
+    read -rp "请选择操作 [0-11]: " choice
     case "${choice}" in
       1) do_install ;;
       2) do_upgrade ;;
@@ -418,6 +463,7 @@ menu() {
       8) do_status ;;
       9) do_restart ;;
      10) do_uninstall ;;
+     11) do_gen_client_cmd ;;
       0) echo "退出"; exit 0 ;;
       *) warn "无效选项，请重新输入" ;;
     esac
