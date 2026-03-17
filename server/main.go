@@ -698,8 +698,8 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 		for _, t := range tasks {
 			tj = append(tj, taskJSON{
 				ID: t.ID, ClientID: t.ClientID,
-				ClientName:  clientNames[t.ClientID],
-				Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
+				ClientName: clientNames[t.ClientID],
+				Mode:       t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
 				DurationSec: t.DurationSec, Status: t.Status,
 				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 				UploadGB:      float64(t.UploadBytes) / (1024 * 1024 * 1024),
@@ -955,8 +955,8 @@ textarea{resize:vertical;min-height:60px}
 .copy-box{display:flex;gap:8px;align-items:center;margin-top:10px}
 .copy-box input{font-family:monospace;font-size:12px;background:#f9fafb}
 .gen-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center}
-.modal-overlay.open{display:flex}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center;pointer-events:none}
+.modal-overlay.open{display:flex;pointer-events:auto}
 .modal-inner{background:#fff;border-radius:14px;padding:22px;width:min(600px,95vw)}
 .modal-inner input{font-family:monospace;font-size:12px;background:#f9fafb}
 @media(max-width:960px){.grid{grid-template-columns:1fr 1fr}.gen-grid{grid-template-columns:1fr 1fr}}
@@ -1502,6 +1502,25 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
   alert('已复制到剪贴板');
 });
 
+function closeModalOnBackdrop(modalId) {
+  var modal = document.getElementById(modalId);
+  if (!modal) return;
+  modal.addEventListener('click', function(e) {
+    if (e.target === modal) {
+      modal.classList.remove('open');
+    }
+  });
+}
+closeModalOnBackdrop('editModal');
+closeModalOnBackdrop('upgradeModal');
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape') return;
+  var opened = document.querySelectorAll('.modal-overlay.open');
+  for (var i = 0; i < opened.length; i++) {
+    opened[i].classList.remove('open');
+  }
+});
+
 	// ── 手动刷新按钮事件监听 ──
 		document.getElementById('reloadBtn').addEventListener('click', function() {
 				location.reload();
@@ -1511,7 +1530,6 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
 </script>
 </body>
 </html>`
-
 
 		tpl := template.Must(template.New("page").Funcs(template.FuncMap{
 			"not": func(b bool) bool { return !b },
