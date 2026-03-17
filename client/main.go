@@ -37,6 +37,7 @@ type HeartbeatReq struct {
 	ClientID    string `json:"client_id"`
 	ClientToken string `json:"client_token"`
 	Version     string `json:"version"`
+	Latency     int    `json:"latency"`
 }
 
 type Task struct {
