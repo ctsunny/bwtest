@@ -1159,7 +1159,6 @@ textarea{resize:vertical;min-height:60px}
 	        {{if eq .Status "running"}}
 	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
 	          <input type="hidden" name="task_id" value="{{.ID}}">
-	          <button type="submit" class="danger stop-btn">停止</button>
 	        </form>
 	        {{else}}<span class="note">-</span>{{end}}
 	      </td>
@@ -1277,7 +1276,6 @@ function buildRunningRow(t) {
 	var stopBtn = t.status === 'running'
 	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
 	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	    + '<button type="submit" class="danger stop-btn">停止</button></form>'
 	  : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
@@ -1405,12 +1403,6 @@ es.onerror = function() {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
-function bindClick(id, handler) {
-  var el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener('click', handler);
-}
-
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
 bindClick('closeEditBtn', function() {
@@ -1472,7 +1464,6 @@ document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
   });
 });
 
-bindClick('copyCmdBtn', function() {
   var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
@@ -1498,20 +1489,6 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-		// ── 手动刷新按钮事件监听 ──
-		bindClick('reloadBtn', function() {
-			pollData();
-			if (liveStatus) liveStatus.textContent = '手动刷新完成: ' + new Date().toLocaleTimeString();
-		});
-
-    var historyOpen = false;
-		bindClick('toggleHistoryBtn', function() {
-      historyOpen = !historyOpen;
-      var card = document.getElementById('historyCard');
-      if (!card) return;
-      card.style.display = historyOpen ? 'block' : 'none';
-      this.textContent = historyOpen ? '隐藏历史任务' : '显示历史任务';
-    });
 
 })();
 </script>
