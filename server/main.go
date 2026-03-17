@@ -1405,9 +1405,15 @@ es.onerror = function() {
   if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
 };
 
+function bindClick(id, handler) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('click', handler);
+}
+
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
-document.getElementById('closeEditBtn').addEventListener('click', function() {
+bindClick('closeEditBtn', function() {
   document.getElementById('editModal').classList.remove('open');
 });
 document.querySelectorAll('.edit-btn').forEach(function(btn) {
@@ -1418,7 +1424,7 @@ document.querySelectorAll('.edit-btn').forEach(function(btn) {
     document.getElementById('editModal').classList.add('open');
   });
 });
-document.getElementById('saveEditBtn').addEventListener('click', function() {
+bindClick('saveEditBtn', function() {
   var name   = document.getElementById('editName').value.trim();
   var remark = document.getElementById('editRemark').value.trim();
   if (!name) { alert('名称不能为空'); return; }
@@ -1440,10 +1446,10 @@ document.getElementById('saveEditBtn').addEventListener('click', function() {
 });
 
 // ── 升级命令弹窗 ──
-document.getElementById('closeUpgradeBtn').addEventListener('click', function() {
+bindClick('closeUpgradeBtn', function() {
   document.getElementById('upgradeModal').classList.remove('open');
 });
-document.getElementById('copyUpgradeBtn').addEventListener('click', function() {
+bindClick('copyUpgradeBtn', function() {
   var el = document.getElementById('upgradeCmd');
   el.select();
   document.execCommand('copy');
@@ -1466,7 +1472,7 @@ document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
   });
 });
 
-document.getElementById('copyCmdBtn').addEventListener('click', function() {
+bindClick('copyCmdBtn', function() {
   var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
@@ -1493,15 +1499,16 @@ document.addEventListener('keydown', function(e) {
 });
 
 		// ── 手动刷新按钮事件监听 ──
-		document.getElementById('reloadBtn').addEventListener('click', function() {
+		bindClick('reloadBtn', function() {
 			pollData();
 			if (liveStatus) liveStatus.textContent = '手动刷新完成: ' + new Date().toLocaleTimeString();
 		});
 
     var historyOpen = false;
-		document.getElementById('toggleHistoryBtn').addEventListener('click', function() {
+		bindClick('toggleHistoryBtn', function() {
       historyOpen = !historyOpen;
       var card = document.getElementById('historyCard');
+      if (!card) return;
       card.style.display = historyOpen ? 'block' : 'none';
       this.textContent = historyOpen ? '隐藏历史任务' : '显示历史任务';
     });
