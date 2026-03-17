@@ -970,7 +970,7 @@ textarea{resize:vertical;min-height:60px}
   <h1>带宽测试面板 <span class="ver-badge">{{.Version}}</span></h1>
   <p>客户端管理、任务下发和实时状态查看。</p>
   <div class="toolbar">
-    <button type="button" onclick="location.reload()">手动刷新</button>
+    <button type="button" id="reloadBtn">手动刷新</button>
     <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
     <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器 Linux</a>
     <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
@@ -1501,6 +1501,11 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
   document.execCommand('copy');
   alert('已复制到剪贴板');
 });
+
+	// ── 手动刷新按钮事件监听 ──
+		document.getElementById('reloadBtn').addEventListener('click', function() {
+				location.reload();
+					});
 
 })();
 </script>
