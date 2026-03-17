@@ -526,9 +526,13 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-		if currentTask != "" && taskStatus(db, currentTask) == "running" {
-			w.WriteHeader(204)
-			return
+		if currentTask != "" {
+			if taskStatus(db, currentTask) == "running" {
+				w.WriteHeader(204)
+				return
+			}
+			// current_task 指向非 running 的旧任务，先清空脏数据
+			_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
 		}
 		var t Task
 		err = db.QueryRow(`
@@ -1163,6 +1167,11 @@ textarea{resize:vertical;min-height:60px}
 	          <input type="hidden" name="task_id" value="{{.ID}}">
 	          <button type="submit" class="danger stop-btn">停止</button>
 	        </form>
+	        {{else if eq .Status "pending"}}
+	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认取消此待执行任务？')">
+	          <input type="hidden" name="task_id" value="{{.ID}}">
+	          <button type="submit" class="warn stop-btn">取消</button>
+	        </form>
 	        {{else}}<span class="note">-</span>{{end}}
 	      </td>
     </tr>
@@ -1285,6 +1294,10 @@ function buildRunningRow(t) {
 	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
 	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
 	    + '<button type="submit" class="danger stop-btn">停止</button></form>'
+	  : t.status === 'pending'
+	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认取消此待执行任务？\')">'
+	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
+	    + '<button type="submit" class="warn stop-btn">取消</button></form>'
 	  : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
@@ -1368,13 +1381,22 @@ function pollData() {
           if (dnCol) dnCol.textContent = fmtGB(t.download_bytes);
           var badge = row.querySelector('.badge');
           if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
-          // 同步停止按钮状态：running 时显示按钮，否则隐藏
+          // 同步操作按钮：running→停止, pending→取消, 其他→-
           var opCell = row.cells[row.cells.length - 1];
           if (opCell) {
             var existBtn = opCell.querySelector('.stop-btn');
-            if (t.status === 'running' && !existBtn) {
+            var wantRunning = t.status === 'running';
+            var wantPending = t.status === 'pending';
+            var hasBtn = !!existBtn;
+            var curClass = existBtn ? existBtn.className : '';
+            var isDanger = curClass.indexOf('danger') !== -1;
+            var isWarn   = curClass.indexOf('warn') !== -1;
+
+            if (wantRunning && (!hasBtn || !isDanger)) {
               opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger stop-btn">停止</button></form>';
-            } else if (t.status !== 'running' && existBtn) {
+            } else if (wantPending && (!hasBtn || !isWarn)) {
+              opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认取消此待执行任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="warn stop-btn">取消</button></form>';
+            } else if (!wantRunning && !wantPending && hasBtn) {
               opCell.innerHTML = '<span class="note">-</span>';
             }
           }
