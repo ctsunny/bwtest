@@ -1478,7 +1478,7 @@ document.addEventListener('click', function(e) {
 });
 
 // ── 生成客户端安装命令 ──
-document.getElementById('genBtn').addEventListener('click', function() {
+	document.getElementById('genBtn').addEventListener('click', function() {
   var name    = document.getElementById('genName').value.trim();
   var remark  = document.getElementById('genRemark').value.trim();
   var version = document.getElementById('genVersion').value.trim() || 'latest';
