@@ -49,6 +49,7 @@ type Client struct {
 	CurrentTask string
 	UpgradeTo   string
 	Version     string
+	Latency     int
 }
 
 type Task struct {
@@ -78,6 +79,7 @@ type HeartbeatReq struct {
 	ClientID    string `json:"client_id"`
 	ClientToken string `json:"client_token"`
 	Version     string `json:"version"`
+	Latency     int    `json:"latency"`
 }
 
 type ResultReq struct {
@@ -324,6 +326,7 @@ func mustInitDB(path string) *sql.DB {
 		`ALTER TABLE clients ADD COLUMN remark TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE clients ADD COLUMN upgrade_to TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE clients ADD COLUMN version TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE clients ADD COLUMN latency INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
@@ -513,8 +516,8 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 		if upgradeTo != "" {
 			_, _ = db.Exec(`UPDATE clients SET upgrade_to='' WHERE id=?`, req.ClientID)
 		}
-		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, version=? WHERE id=?`,
-			time.Now().Format(time.RFC3339), realIP(r), req.Version, req.ClientID)
+		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, version=?, latency=? WHERE id=?`,
+			time.Now().Format(time.RFC3339), realIP(r), req.Version, req.Latency, req.ClientID)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upgrade_to": upgradeTo})
 	}
 }
@@ -699,6 +702,7 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			LastSeen    string `json:"last_seen"`
 			RemoteIP    string `json:"remote_ip"`
 			CurrentTask string `json:"current_task"`
+			Latency     int    `json:"latency"`
 		}
 		type taskJSON struct {
 			ID            string  `json:"id"`
@@ -726,6 +730,7 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				ID: c.ID, Name: c.Name, Remark: c.Remark,
 				Approved: c.Approved, LastSeen: c.LastSeen,
 				RemoteIP: c.RemoteIP, CurrentTask: c.CurrentTask,
+				Latency: c.Latency,
 			})
 		}
 		tj := make([]taskJSON, 0, len(tasks))
@@ -1014,12 +1019,17 @@ textarea{resize:vertical;min-height:60px}
 <div class="card">
   <h1>带宽测试面板 <span class="ver-badge">{{.Version}}</span></h1>
   <p>客户端管理、任务下发和实时状态查看。</p>
-  <div class="toolbar">
-    <button type="button" id="reloadBtn">手动刷新</button>
-    <button type="button" class="sec" id="toggleHistoryBtn">显示历史任务</button>
-    <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
-    <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器 Linux</a>
-    <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
+  <div class="toolbar" style="display:flex; justify-content:space-between; width:100%">
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <button type="button" id="reloadBtn">手动刷新</button>
+      <button type="button" class="sec" id="toggleHistoryBtn">显示历史任务</button>
+      <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <button type="button" class="btn info" onclick="document.getElementById('genModal').classList.add('open')">➕ 增加客户端</button>
+      <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
+      <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器 Linux</a>
+    </div>
   </div>
 </div>
 
@@ -1077,19 +1087,53 @@ textarea{resize:vertical;min-height:60px}
   </div>
 </div>
 
+<!-- 增加客户端弹窗 -->
+<div id="genModal" class="modal-overlay {{if .GeneratedCmd}}open{{end}}">
+  <div class="modal-inner">
+    <h2>➕ 生成客户端</h2>
+    <form method="post" action="{{.PanelPath}}/gen/install-cmd">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div>
+          <label class="note">客户端名称 *</label>
+          <input id="genName" name="gen_name" value="{{.GenName}}" required placeholder="例如：my-vps" style="margin-top:4px">
+        </div>
+        <div>
+          <label class="note">备注（可选）</label>
+          <input id="genRemark" name="gen_remark" value="{{.GenRemark}}" placeholder="可选备注" style="margin-top:4px">
+        </div>
+        <div>
+          <label class="note">版本号</label>
+          <input id="genVersion" name="gen_version" value="{{.GenVersion}}" style="margin-top:4px">
+        </div>
+        <div>
+          <button type="submit" id="genBtn" style="width:100%">生成命令</button>
+        </div>
+      </div>
+    </form>
+    <div class="copy-box" id="cmdBox" style="display:{{if .GeneratedCmd}}flex{{else}}none{{end}};margin-top:16px">
+      <input id="cmdText" readonly value="{{.GeneratedCmd}}">
+      <button type="button" class="sec" id="copyCmdBtn">复制</button>
+    </div>
+    <div class="tip" id="cmdTip">{{if .GeneratedCmd}}将此命令复制到客户端 VPS 上执行即可完成安装与注册。{{end}}</div>
+    <div style="margin-top:16px;text-align:right">
+      <button type="button" class="sec" onclick="document.getElementById('genModal').classList.remove('open')">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <h2>客户端列表</h2>
   <div class="tbl">
   <table>
-    <thead><tr><th>名称</th><th>版本</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
+    <thead><tr><th>名称</th><th>版本</th><th>备注</th><th>已批准</th><th>网络延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
-    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
       <td>{{.Name}}</td>
       <td><span class="badge info" style="font-family:monospace">{{.Version}}</span></td>
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
-      <td class="ping-col">-</td>
+      <td class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
       <td class="lastseen-col">{{.LastSeen | shortTime}}</td>
       <td>{{.RemoteIP}}</td>
       <td class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
@@ -1115,7 +1159,7 @@ textarea{resize:vertical;min-height:60px}
     </tbody>
   </table>
   </div>
-  <div class="tip">心跳延迟：距上次心跳的秒数，超过 60s 变红。创建任务前请确认客户端已批准。</div>
+  <div class="tip">网络延迟：基于最近一次心跳请求测量。超过3分钟失去连接心跳时间将标红。</div>
 </div>
 
 <div class="card">
@@ -1167,33 +1211,7 @@ textarea{resize:vertical;min-height:60px}
   <div class="tip">上传/下载速度单位为 Mbps；时长默认选"分"，1 分 = 60 秒。</div>
 </div>
 
-<div class="card">
-  <h2>生成客户端安装命令</h2>
-  <form method="post" action="{{.PanelPath}}/gen/install-cmd">
-  <div class="gen-grid">
-    <div>
-      <label class="note">客户端名称</label>
-      <input id="genName" name="gen_name" value="{{.GenName}}" placeholder="例：香港-1号机" style="margin-top:4px">
-    </div>
-    <div>
-      <label class="note">备注（可选）</label>
-      <input id="genRemark" name="gen_remark" value="{{.GenRemark}}" placeholder="可选备注" style="margin-top:4px">
-    </div>
-    <div>
-      <label class="note">版本号</label>
-      <input id="genVersion" name="gen_version" value="{{.GenVersion}}" style="margin-top:4px">
-    </div>
-    <div style="align-self:end">
-      <button type="submit" id="genBtn" style="width:100%">生成命令</button>
-    </div>
-  </div>
-  </form>
-  <div class="copy-box" id="cmdBox" style="display:{{if .GeneratedCmd}}flex{{else}}none{{end}}">
-    <input id="cmdText" readonly value="{{.GeneratedCmd}}">
-    <button type="button" class="sec" id="copyCmdBtn">复制</button>
-  </div>
-  <div class="tip" id="cmdTip">{{if .GeneratedCmd}}将此命令复制到客户端 VPS 上执行即可完成安装与注册。{{end}}</div>
-</div>
+
 
 <!-- 正在运行的任务 -->
 <div class="card">
@@ -1302,42 +1320,46 @@ function fmtGB(bytes) {
   if (!bytes || bytes === 0) return '0.000 GB';
   return (bytes / 1073741824).toFixed(3) + ' GB';
 }
-function calcPing(lastSeen) {
-  if (!lastSeen) return null;
+function renderPing(lat, lastSeen) {
+  if (!lastSeen) return { text: '?', cls: 'ping-warn' };
   var t = new Date(lastSeen);
-  if (isNaN(t)) return null;
-  return Date.now() - t.getTime();
+  if (isNaN(t) || Date.now() - t.getTime() > 180000) {
+    return { text: '离线', cls: 'ping-dead' }; // 超过 3 分钟心跳未到视为离线
+  }
+  if (!lat || lat <= 0) {
+    return { text: '-', cls: 'ping-warn' };
+  }
+  var cls = 'ping-ok';
+  if (lat > 200) cls = 'ping-warn';
+  if (lat > 500) cls = 'ping-dead';
+  return { text: lat + ' ms', cls: cls };
 }
-function renderPing(ms) {
-  if (ms === null) return { text: '?', cls: 'ping-warn' };
-  var sec = Math.round(ms / 1000);
-  if (ms < 30000)  return { text: sec + 's', cls: 'ping-ok' };
-  if (ms < 90000)  return { text: sec + 's ⚠', cls: 'ping-warn' };
-  return { text: sec + 's ✖', cls: 'ping-dead' };
-}
+
 function syncRunningTaskLatency() {
   document.querySelectorAll('#runningTaskBody .rtt-col[data-client-id]').forEach(function(cell) {
     var cid = cell.dataset.clientId;
     var crow = document.querySelector('#clientBody tr[data-client-id="' + cid + '"]');
-    var ms = crow ? calcPing(crow.dataset.lastSeen) : null;
-    var r = renderPing(ms);
+    var lat = crow ? parseInt(crow.dataset.latency) || 0 : 0;
+    var lastSeen = crow ? crow.dataset.lastSeen : null;
+    var r = renderPing(lat, lastSeen);
     cell.textContent = r.text;
     cell.className = 'rtt-col ' + r.cls;
   });
 }
+
 function tickPing() {
   document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
     var cell = row.querySelector('.ping-col');
     if (!cell) return;
-    var ms = calcPing(row.dataset.lastSeen);
-    var r = renderPing(ms);
+    var lat = parseInt(row.dataset.latency) || 0;
+    var r = renderPing(lat, row.dataset.lastSeen);
     cell.textContent = r.text;
     cell.className = 'ping-col ' + r.cls;
   });
   syncRunningTaskLatency();
 }
-setInterval(tickPing, 15000);
-tickPing();
+// 数据刷新时同步更新一次这块 UI 就够了，不需要单独的计时器高频刷了
+
 
 var knownTaskStatus = {};
 
@@ -1475,6 +1497,9 @@ function pollData() {
           var lsCol = row.querySelector('.lastseen-col');
           if (lsCol) lsCol.textContent = fmtShortTime(c.last_seen);
         }
+        if (c.latency !== undefined) {
+          row.dataset.latency = c.latency;
+        }
         var ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
         if (c.name) clientNameMap[c.id] = c.name;
@@ -1488,6 +1513,7 @@ function pollData() {
 }
 setInterval(pollData, 5000);
 pollData();
+tickPing();
 
 var es = new EventSource(PANEL_PATH + '/events');
 var liveStatus = document.getElementById('liveStatus');
@@ -1506,48 +1532,19 @@ var editClientId = '';
 document.getElementById('closeEditBtn').addEventListener('click', function() {
   document.getElementById('editModal').classList.remove('open');
 });
-document.querySelectorAll('.edit-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    editClientId = btn.dataset.id;
-    document.getElementById('editName').value   = btn.dataset.name || '';
-    document.getElementById('editRemark').value = btn.dataset.remark || '';
-    document.getElementById('editModal').classList.add('open');
-  });
-});
-document.getElementById('saveEditBtn').addEventListener('click', function() {
-  var name   = document.getElementById('editName').value.trim();
-  var remark = document.getElementById('editRemark').value.trim();
-  if (!name) { alert('名称不能为空'); return; }
-  var saveBtn = document.getElementById('saveEditBtn');
-  saveBtn.disabled = true;
-  apiFetch('/client/edit',
-    'client_id=' + encodeURIComponent(editClientId) +
-    '&name='      + encodeURIComponent(name) +
-    '&remark='    + encodeURIComponent(remark))
-    .then(function(r) {
-      if (!r.ok) throw new Error(r.status);
-      document.getElementById('editModal').classList.remove('open');
-      location.reload();
-    })
-    .catch(function(err) {
-      alert('保存失败: ' + err);
-      saveBtn.disabled = false;
-    });
-});
+document.querySelector('#clientBody').addEventListener('click', function(e) {
+  var target = e.target;
+  if (!target || !target.classList) return;
 
-// ── 升级命令弹窗 ──
-bindClick('closeUpgradeBtn', function() {
-  document.getElementById('upgradeModal').classList.remove('open');
-});
-bindClick('copyUpgradeBtn', function() {
-  var el = document.getElementById('upgradeCmd');
-  el.select();
-  document.execCommand('copy');
-  alert('已复制到剪贴板');
-});
-document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var clientName = btn.dataset.name || '';
+  if (target.classList.contains('edit-btn')) {
+    editClientId = target.dataset.id;
+    document.getElementById('editName').value   = target.dataset.name || '';
+    document.getElementById('editRemark').value = target.dataset.remark || '';
+    document.getElementById('editModal').classList.add('open');
+  }
+
+  if (target.classList.contains('upgrade-btn')) {
+    var clientName = target.dataset.name || '';
     var panelUrl   = location.protocol + '//' + PANEL_ADDR;
     var ver        = VERSION || 'latest';
     var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
@@ -1559,26 +1556,17 @@ document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
       + " --version " + ver;
     document.getElementById('upgradeCmd').value = cmd;
     document.getElementById('upgradeModal').classList.add('open');
-  });
-});
+  }
 
-document.getElementById('copyCmdBtn').addEventListener('click', function() {
-  var el = document.getElementById('cmdText');
-  el.select();
-  document.execCommand('copy');
-  alert('已复制到剪贴板');
-});
-
-// ── 推送更新弹窗 ──
-var pushUpgradeClientId = '';
-document.querySelectorAll('.push-upgrade-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    pushUpgradeClientId = btn.dataset.id || '';
-    document.getElementById('pushUpgradeClientName').value = btn.dataset.name || pushUpgradeClientId;
+  if (target.classList.contains('push-upgrade-btn')) {
+    pushUpgradeClientId = target.dataset.id || '';
+    document.getElementById('pushUpgradeClientName').value = target.dataset.name || pushUpgradeClientId;
     document.getElementById('pushUpgradeVersion').value = VERSION || 'latest';
     document.getElementById('pushUpgradeModal').classList.add('open');
-  });
+  }
+  }
 });
+
 bindClick('closePushUpgradeBtn', function() {
   document.getElementById('pushUpgradeModal').classList.remove('open');
 });
@@ -1600,6 +1588,42 @@ bindClick('confirmPushUpgradeBtn', function() {
     .finally(function() { confirmBtn.disabled = false; });
 });
 
+document.getElementById('saveEditBtn').addEventListener('click', function() {
+  var name   = document.getElementById('editName').value.trim();
+  var remark = document.getElementById('editRemark').value.trim();
+  if (!name) { alert('名称不能为空'); return; }
+  var saveBtn = document.getElementById('saveEditBtn');
+  saveBtn.disabled = true;
+  apiFetch('/client/edit',
+    'client_id=' + encodeURIComponent(editClientId) +
+    '&name='      + encodeURIComponent(name) +
+    '&remark='    + encodeURIComponent(remark))
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status);
+      document.getElementById('editModal').classList.remove('open');
+      location.reload();
+    })
+    .catch(function(err) {
+      alert('保存失败: ' + err);
+      saveBtn.disabled = false;
+    });
+});
+bindClick('closeUpgradeBtn', function() {
+  document.getElementById('upgradeModal').classList.remove('open');
+});
+bindClick('copyUpgradeBtn', function() {
+  var el = document.getElementById('upgradeCmd');
+  el.select();
+  document.execCommand('copy');
+  alert('已复制到剪贴板');
+});
+document.getElementById('copyCmdBtn').addEventListener('click', function() {
+  var el = document.getElementById('cmdText');
+  el.select();
+  document.execCommand('copy');
+  alert('已复制到剪贴板');
+});
+
 function closeModalOnBackdrop(modalId) {
   var modal = document.getElementById(modalId);
   if (!modal) return;
@@ -1612,6 +1636,7 @@ function closeModalOnBackdrop(modalId) {
 closeModalOnBackdrop('editModal');
 closeModalOnBackdrop('upgradeModal');
 closeModalOnBackdrop('pushUpgradeModal');
+closeModalOnBackdrop('genModal');
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
   var opened = document.querySelectorAll('.modal-overlay.open');
@@ -1936,7 +1961,7 @@ func handleDeleteClient(panelPath string, db *sql.DB, broker *Broker) http.Handl
 }
 
 func mustClients(db *sql.DB) []Client {
-	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version FROM clients`)
+	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version,latency FROM clients`)
 	if err != nil {
 		return nil
 	}
@@ -1945,7 +1970,7 @@ func mustClients(db *sql.DB) []Client {
 	for rows.Next() {
 		var c Client
 		var approved int
-		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version)
+		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version, &c.Latency)
 		c.Approved = approved == 1
 		out = append(out, c)
 	}

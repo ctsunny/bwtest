@@ -151,18 +151,30 @@ func register(cfg *Config) error {
 }
 
 func heartbeatLoop(cfg *Config) {
-	tk := time.NewTicker(20 * time.Second)
+	tk := time.NewTicker(15 * time.Second)
 	defer tk.Stop()
+	var lastLatency int
 	for range tk.C {
 		var resp struct {
 			OK        bool   `json:"ok"`
 			UpgradeTo string `json:"upgrade_to"`
 		}
-		_ = postJSON(cfg.ServerURL+"/api/heartbeat", HeartbeatReq{
+		
+		req := HeartbeatReq{
 			ClientID:    cfg.ClientID,
 			ClientToken: cfg.ClientToken,
 			Version:     getenv("BWAGENT_VERSION", "unknown"),
-		}, &resp)
+			Latency:     lastLatency,
+		}
+
+		start := time.Now()
+		err := postJSON(cfg.ServerURL+"/api/heartbeat", req, &resp)
+		if err == nil {
+			lastLatency = int(time.Since(start).Milliseconds())
+		} else {
+			lastLatency = -1
+		}
+
 		if resp.UpgradeTo != "" {
 			currentVer := getenv("BWAGENT_VERSION", "")
 			if resp.UpgradeTo != currentVer {
