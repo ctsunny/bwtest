@@ -59,6 +59,11 @@ sudo bash -s -- \
 5. Click **Create Task**. The panel auto-refreshes via SSE.
 6. To stop a running task early, click **Stop** in the Tasks table.
 
+### Troubleshooting
+
+- If a task appears as `pending` for a long time after service restarts, use the panel's **取消/停止** action to mark it `stopped` and recreate the task.
+- If action buttons in the web panel do not respond, hard refresh the browser (Ctrl+F5) and verify Basic Auth is still valid.
+
 ## Useful commands
 
 ```bash
