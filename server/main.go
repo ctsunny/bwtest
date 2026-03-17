@@ -1,7 +1,5 @@
 package main
 
-const AppVersion = "v0.4.0"
-
 import (
 	"bufio"
 	"crypto/rand"
@@ -26,6 +24,8 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+const AppVersion = "v0.4.0"
 
 type Config struct {
 	PanelAddr  string
