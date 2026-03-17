@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -147,10 +149,21 @@ func heartbeatLoop(cfg *Config) {
 	tk := time.NewTicker(20 * time.Second)
 	defer tk.Stop()
 	for range tk.C {
+		var resp struct {
+			OK        bool   `json:"ok"`
+			UpgradeTo string `json:"upgrade_to"`
+		}
 		_ = postJSON(cfg.ServerURL+"/api/heartbeat", HeartbeatReq{
 			ClientID:    cfg.ClientID,
 			ClientToken: cfg.ClientToken,
-		}, nil)
+		}, &resp)
+		if resp.UpgradeTo != "" {
+			currentVer := getenv("BWAGENT_VERSION", "")
+			if resp.UpgradeTo != currentVer {
+				log.Printf("[upgrade] 服务端要求升级到 %s，开始自动升级...", resp.UpgradeTo)
+				go selfUpgrade(resp.UpgradeTo)
+			}
+		}
 	}
 }
 
@@ -261,7 +274,14 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 				return
 			}
 			status, err := taskControl(cfg, t.ID)
-			if err == nil && status == "stopping" {
+			if err != nil {
+				// 401 / 网络错误：任务已不存在或服务端重启，立即停止
+				log.Printf("[task %s] control check error: %v, stopping", t.ID, err)
+				atomic.StoreInt32(&stopFlag, 1)
+				return
+			}
+			// stopping: 服务端请求停止; stopped/done: 服务端已直接终止（如重启重置、看门狗超时）
+			if status == "stopping" || status == "stopped" || status == "done" {
 				atomic.StoreInt32(&stopFlag, 1)
 				return
 			}
@@ -495,3 +515,84 @@ func hostname() string {
 	}
 	return h
 }
+
+// selfUpgrade 安全地将自身升级到指定版本。
+// 流程：下载临时文件 → 验证 → 原子替换旧二进制 → 重启服务
+func selfUpgrade(version string) {
+	// 确定下载架构
+	arch := runtime.GOARCH // "amd64" / "arm64"
+	if arch != "amd64" && arch != "arm64" {
+		log.Printf("[upgrade] 不支持的架构 %s，跳过升级", arch)
+		return
+	}
+
+	dlURL := fmt.Sprintf(
+		"https://github.com/ctsunny/bwtest/releases/download/%s/bwagent-linux-%s",
+		version, arch,
+	)
+	log.Printf("[upgrade] 开始下载 %s", dlURL)
+
+	dlClient := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := dlClient.Get(dlURL)
+	if err != nil {
+		log.Printf("[upgrade] 下载失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Printf("[upgrade] 下载失败: HTTP %d", resp.StatusCode)
+		return
+	}
+
+	// 写入临时文件
+	tmpPath := "/tmp/bwagent-upgrade-" + version
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		log.Printf("[upgrade] 创建临时文件失败: %v", err)
+		return
+	}
+	n, err := io.Copy(f, resp.Body)
+	f.Close()
+	if err != nil || n == 0 {
+		log.Printf("[upgrade] 写入临时文件失败: %v (n=%d)", err, n)
+		_ = os.Remove(tmpPath)
+		return
+	}
+	log.Printf("[upgrade] 下载完成，文件大小 %d 字节", n)
+
+	// 获取当前二进制路径
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("[upgrade] 无法获取当前二进制路径: %v", err)
+		_ = os.Remove(tmpPath)
+		return
+	}
+
+	// 原子替换：先备份，再 rename（Linux 上 rename 是原子操作）
+	backupPath := exePath + ".bak"
+	_ = os.Remove(backupPath)
+	if err := os.Rename(exePath, backupPath); err != nil {
+		log.Printf("[upgrade] 备份旧二进制失败: %v", err)
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, exePath); err != nil {
+		log.Printf("[upgrade] 替换二进制失败: %v，尝试还原...", err)
+		_ = os.Rename(backupPath, exePath)
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = os.Remove(backupPath)
+	log.Printf("[upgrade] 二进制替换成功，即将退出由 systemd 以新版本重启...")
+
+	// 延迟 1 秒确保当前心跳响应已处理完毕
+	time.Sleep(time.Second)
+
+	// 优先尝试 sudo systemctl restart（需要 sudoers 配置）
+	// 如果无权限则直接 Exit(0) — systemd Restart=always 会自动重新拉起
+	if err := exec.Command("sudo", "-n", "systemctl", "restart", "bwagent").Run(); err != nil {
+		log.Printf("[upgrade] sudo systemctl restart 不可用(%v)，通过 os.Exit(0) 触发 systemd respawn", err)
+	}
+	os.Exit(0)
+}
+

@@ -45,6 +45,7 @@ type Client struct {
 	LastSeen    string
 	RemoteIP    string
 	CurrentTask string
+	UpgradeTo   string
 }
 
 type Task struct {
@@ -239,6 +240,7 @@ func main() {
 	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
 	mux.Handle(p+"/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(p, cfg, db, broker))))
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
+	mux.Handle(p+"/client/upgrade", basicAuth(cfg, http.HandlerFunc(handlePushUpgrade(p, db))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
@@ -324,6 +326,7 @@ func mustInitDB(path string) *sql.DB {
 			current_task TEXT NOT NULL DEFAULT ''
 		);`,
 		`ALTER TABLE clients ADD COLUMN remark TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE clients ADD COLUMN upgrade_to TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
@@ -507,9 +510,15 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
+		// 读取 upgrade_to，然后原子清除，保证只下发一次
+		var upgradeTo string
+		_ = db.QueryRow(`SELECT upgrade_to FROM clients WHERE id=?`, req.ClientID).Scan(&upgradeTo)
+		if upgradeTo != "" {
+			_, _ = db.Exec(`UPDATE clients SET upgrade_to='' WHERE id=?`, req.ClientID)
+		}
 		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=? WHERE id=?`,
 			time.Now().Format(time.RFC3339), realIP(r), req.ClientID)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upgrade_to": upgradeTo})
 	}
 }
 
@@ -589,7 +598,10 @@ func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		if finalStatus == "" {
 			finalStatus = "done"
 		}
-		if status == "stopping" {
+		// 服务端已经强制终止的任务，保留服务端状态，不被客户端上报覆盖
+		if status == "stopped" || status == "done" {
+			finalStatus = status
+		} else if status == "stopping" {
 			finalStatus = "stopped"
 		}
 		_, _ = db.Exec(`UPDATE tasks SET status=?, finished_at=?, upload_bytes=?, download_bytes=? WHERE id=?`,
@@ -1011,6 +1023,26 @@ textarea{resize:vertical;min-height:60px}
   </div>
 </div>
 
+<!-- 推送更新弹窗 -->
+<div id="pushUpgradeModal" class="modal-overlay">
+  <div class="modal-inner" style="width:min(480px,95vw)">
+    <h2>🚀 推送自动更新</h2>
+    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">客户端下次心跳（约20秒内）将自动下载并替换二进制，然后重启 bwagent 服务。</p>
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;color:var(--muted)">目标客户端</label>
+      <input id="pushUpgradeClientName" readonly style="margin-top:4px;background:#f3f4f6">
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;color:var(--muted)">目标版本号（留空使用当前服务端版本）</label>
+      <input id="pushUpgradeVersion" placeholder="例：v0.2.1 或 latest" style="margin-top:4px">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button type="button" class="warn" id="confirmPushUpgradeBtn">确认推送</button>
+      <button type="button" class="sec" id="closePushUpgradeBtn">取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- 编辑客户端弹窗 -->
 <div id="editModal" class="modal-overlay">
   <div class="modal-inner" style="width:min(480px,95vw)">
@@ -1037,7 +1069,7 @@ textarea{resize:vertical;min-height:60px}
     <thead><tr><th>名称</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
-    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-approved="{{if .Approved}}1{{else}}0{{end}}">
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
       <td>{{.Name}}</td>
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
@@ -1055,6 +1087,7 @@ textarea{resize:vertical;min-height:60px}
 	        {{end}}
         <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
         <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级命令</button>
+        <button type="button" class="warn push-upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">推送更新</button>
         </div>
       </td>
     </tr>
@@ -1257,9 +1290,10 @@ function calcPing(lastSeen) {
 }
 function renderPing(ms) {
   if (ms === null) return { text: '?', cls: 'ping-warn' };
-  if (ms < 30000) return { text: ms + ' ms', cls: 'ping-ok' };
-  if (ms < 60000) return { text: ms + ' ms', cls: 'ping-warn' };
-  return { text: ms + ' ms ⚠', cls: 'ping-dead' };
+  var sec = Math.round(ms / 1000);
+  if (ms < 30000)  return { text: sec + 's', cls: 'ping-ok' };
+  if (ms < 90000)  return { text: sec + 's ⚠', cls: 'ping-warn' };
+  return { text: sec + 's ✖', cls: 'ping-dead' };
 }
 function syncRunningTaskLatency() {
   document.querySelectorAll('#runningTaskBody .rtt-col[data-client-id]').forEach(function(cell) {
@@ -1502,6 +1536,37 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
   alert('已复制到剪贴板');
 });
 
+// ── 推送更新弹窗 ──
+var pushUpgradeClientId = '';
+document.querySelectorAll('.push-upgrade-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    pushUpgradeClientId = btn.dataset.id || '';
+    document.getElementById('pushUpgradeClientName').value = btn.dataset.name || pushUpgradeClientId;
+    document.getElementById('pushUpgradeVersion').value = VERSION || 'latest';
+    document.getElementById('pushUpgradeModal').classList.add('open');
+  });
+});
+bindClick('closePushUpgradeBtn', function() {
+  document.getElementById('pushUpgradeModal').classList.remove('open');
+});
+bindClick('confirmPushUpgradeBtn', function() {
+  var ver = document.getElementById('pushUpgradeVersion').value.trim();
+  var confirmBtn = document.getElementById('confirmPushUpgradeBtn');
+  confirmBtn.disabled = true;
+  apiFetch('/client/upgrade',
+    'client_id=' + encodeURIComponent(pushUpgradeClientId) +
+    '&version='   + encodeURIComponent(ver))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      document.getElementById('pushUpgradeModal').classList.remove('open');
+      alert('✅ 已推送更新指令（版本: ' + (d.version || ver) + '）\n客户端将在下次心跳后自动升级（约20秒内）。');
+    })
+    .catch(function(err) {
+      alert('推送失败: ' + err);
+    })
+    .finally(function() { confirmBtn.disabled = false; });
+});
+
 function closeModalOnBackdrop(modalId) {
   var modal = document.getElementById(modalId);
   if (!modal) return;
@@ -1513,6 +1578,7 @@ function closeModalOnBackdrop(modalId) {
 }
 closeModalOnBackdrop('editModal');
 closeModalOnBackdrop('upgradeModal');
+closeModalOnBackdrop('pushUpgradeModal');
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
   var opened = document.querySelectorAll('.modal-overlay.open');
@@ -1791,8 +1857,26 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 	}
 }
 
+func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		_ = r.ParseForm()
+		clientID := r.Form.Get("client_id")
+		version  := strings.TrimSpace(r.Form.Get("version"))
+		if version == "" {
+			version = getenv("BWPANEL_VERSION", "latest")
+		}
+		_, _ = db.Exec(`UPDATE clients SET upgrade_to=? WHERE id=?`, version, clientID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": version})
+	}
+}
+
 func mustClients(db *sql.DB) []Client {
-	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task FROM clients`)
+	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to FROM clients`)
 	if err != nil {
 		return nil
 	}
@@ -1801,7 +1885,7 @@ func mustClients(db *sql.DB) []Client {
 	for rows.Next() {
 		var c Client
 		var approved int
-		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask)
+		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo)
 		c.Approved = approved == 1
 		out = append(out, c)
 	}

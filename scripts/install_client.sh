@@ -182,6 +182,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_GROUP}
 WorkingDirectory=${INSTALL_DIR}
+Environment="BWAGENT_VERSION=${VERSION}"
 ExecStart=${BIN_PATH} ${CONFIG_FILE}
 Restart=always
 RestartSec=3
