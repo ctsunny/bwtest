@@ -983,6 +983,7 @@ textarea{resize:vertical;min-height:60px}
   <p>客户端管理、任务下发和实时状态查看。</p>
   <div class="toolbar">
     <button type="button" id="reloadBtn">手动刷新</button>
+    <button type="button" class="sec" id="toggleHistoryBtn">显示历史任务</button>
     <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
     <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器 Linux</a>
     <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
@@ -1140,7 +1141,7 @@ textarea{resize:vertical;min-height:60px}
   <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>网络延迟</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
     <tbody id="runningTaskBody">
     {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
@@ -1150,6 +1151,7 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.DownMbps}}</td>
       <td>{{.DurationSec}} 秒</td>
       <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td class="rtt-col" data-client-id="{{.ClientID}}">-</td>
       <td class="up-col">-</td>
       <td class="down-col">-</td>
       <td>{{.StartedAt}}</td>
@@ -1157,20 +1159,19 @@ textarea{resize:vertical;min-height:60px}
 	        {{if eq .Status "running"}}
 	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
 	          <input type="hidden" name="task_id" value="{{.ID}}">
-	          <button type="submit" class="danger">停止</button>
 	        </form>
 	        {{else}}<span class="note">-</span>{{end}}
 	      </td>
     </tr>
     {{end}}
-    {{if (not .RunningTasks)}}<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
+	    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
 </div>
 
 <!-- 历史任务 -->
-<div class="card">
+<div class="card" id="historyCard" style="display:none">
   <h2>📋 历史任务</h2>
   <div class="tbl">
   <table>
@@ -1196,7 +1197,7 @@ textarea{resize:vertical;min-height:60px}
 	      </td>
     </tr>
     {{end}}
-    {{if (not .HistoryTasks)}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
+	    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
@@ -1235,41 +1236,52 @@ function calcPing(lastSeen) {
   if (!lastSeen) return null;
   var t = new Date(lastSeen);
   if (isNaN(t)) return null;
-  return Math.floor((Date.now() - t.getTime()) / 1000);
+  return Date.now() - t.getTime();
 }
-function renderPing(sec) {
-  if (sec === null) return { text: '?', cls: 'ping-warn' };
-  if (sec < 30)  return { text: sec + 's', cls: 'ping-ok' };
-  if (sec < 60)  return { text: sec + 's', cls: 'ping-warn' };
-  return { text: sec + 's ⚠', cls: 'ping-dead' };
+function renderPing(ms) {
+  if (ms === null) return { text: '?', cls: 'ping-warn' };
+  if (ms < 30000) return { text: ms + ' ms', cls: 'ping-ok' };
+  if (ms < 60000) return { text: ms + ' ms', cls: 'ping-warn' };
+  return { text: ms + ' ms ⚠', cls: 'ping-dead' };
+}
+function syncRunningTaskLatency() {
+  document.querySelectorAll('#runningTaskBody .rtt-col[data-client-id]').forEach(function(cell) {
+    var cid = cell.dataset.clientId;
+    var crow = document.querySelector('#clientBody tr[data-client-id="' + cid + '"]');
+    var ms = crow ? calcPing(crow.dataset.lastSeen) : null;
+    var r = renderPing(ms);
+    cell.textContent = r.text;
+    cell.className = 'rtt-col ' + r.cls;
+  });
 }
 function tickPing() {
   document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
     var cell = row.querySelector('.ping-col');
     if (!cell) return;
-    var sec = calcPing(row.dataset.lastSeen);
-    var r = renderPing(sec);
+    var ms = calcPing(row.dataset.lastSeen);
+    var r = renderPing(ms);
     cell.textContent = r.text;
     cell.className = 'ping-col ' + r.cls;
   });
+  syncRunningTaskLatency();
 }
-setInterval(tickPing, 1000);
+setInterval(tickPing, 15000);
 tickPing();
 
 var knownTaskStatus = {};
 
-// 动态行：停止按钮用 data-task-id + class="stop-btn"，不再内嵌 form
+// 动态行：停止按钮输出为 form，保证无 JS 也可提交
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
 	var stopBtn = t.status === 'running'
 	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
 	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	    + '<button type="submit" class="danger">停止</button></form>'
 	  : '<span class="note">-</span>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
     + '<td>' + t.duration_sec + ' 秒</td>'
     + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
+    + '<td class="rtt-col" data-client-id="' + t.client_id + '">-</td>'
     + '<td class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
     + '<td class="down-col">' + fmtGB(t.download_bytes) + '</td>'
     + '<td>' + t.started_at + '</td>'
@@ -1277,7 +1289,7 @@ function buildRunningRow(t) {
     + '</tr>';
 }
 
-// 动态行：删除按钮用 data-task-id + class="delete-btn"，不再内嵌 form
+// 动态行：删除按钮输出为 form，保证无 JS 也可提交
 function buildHistoryRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   return '<tr data-task-id="' + t.id + '">'
@@ -1295,7 +1307,7 @@ function buildHistoryRow(t) {
 }
 
 function pollData() {
-  fetch('/api/data', {credentials: 'include'})
+  fetch('/api/data', {credentials: 'include', cache: 'no-store'})
     .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function(data) {
       var tasks = data.tasks || [];
@@ -1319,11 +1331,19 @@ function pollData() {
       historyTasks.forEach(function(t) {
         if (!document.querySelector('#historyTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
       });
+      document.querySelectorAll('#runningTaskBody tr[data-task-id]').forEach(function(row) {
+        var id = row.dataset.taskId;
+        if (!tasks.some(function(t) { return t.id === id; })) needFullRefresh = true;
+      });
+      document.querySelectorAll('#historyTaskBody tr[data-task-id]').forEach(function(row) {
+        var id = row.dataset.taskId;
+        if (!tasks.some(function(t) { return t.id === id; })) needFullRefresh = true;
+      });
 
       if (needFullRefresh) {
         var rb = document.getElementById('runningTaskBody');
         if (rb) rb.innerHTML = runningTasks.length === 0
-          ? '<tr id="noRunningRow"><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
+          ? '<tr id="noRunningRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
           : runningTasks.map(buildRunningRow).join('');
         var hb = document.getElementById('historyTaskBody');
         if (hb) hb.innerHTML = historyTasks.length === 0
@@ -1344,7 +1364,7 @@ function pollData() {
           if (opCell) {
             var existBtn = opCell.querySelector('.stop-btn');
             if (t.status === 'running' && !existBtn) {
-              opCell.innerHTML = '<button type="button" class="danger stop-btn" data-task-id="' + t.id + '">停止</button>';
+              opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger stop-btn">停止</button></form>';
             } else if (t.status !== 'running' && existBtn) {
               opCell.innerHTML = '<span class="note">-</span>';
             }
@@ -1385,18 +1405,18 @@ es.onerror = function() {
 
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
-document.getElementById('closeEditBtn').addEventListener('click', function() {
+bindClick('closeEditBtn', function() {
   document.getElementById('editModal').classList.remove('open');
 });
-document.addEventListener('click', function(e) {
-  var btn = e.target.closest('.edit-btn');
-  if (!btn) return;
-  editClientId = btn.dataset.id;
-  document.getElementById('editName').value   = btn.dataset.name || '';
-  document.getElementById('editRemark').value = btn.dataset.remark || '';
-  document.getElementById('editModal').classList.add('open');
+document.querySelectorAll('.edit-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    editClientId = btn.dataset.id;
+    document.getElementById('editName').value   = btn.dataset.name || '';
+    document.getElementById('editRemark').value = btn.dataset.remark || '';
+    document.getElementById('editModal').classList.add('open');
+  });
 });
-document.getElementById('saveEditBtn').addEventListener('click', function() {
+bindClick('saveEditBtn', function() {
   var name   = document.getElementById('editName').value.trim();
   var remark = document.getElementById('editRemark').value.trim();
   if (!name) { alert('名称不能为空'); return; }
@@ -1418,33 +1438,32 @@ document.getElementById('saveEditBtn').addEventListener('click', function() {
 });
 
 // ── 升级命令弹窗 ──
-document.getElementById('closeUpgradeBtn').addEventListener('click', function() {
+bindClick('closeUpgradeBtn', function() {
   document.getElementById('upgradeModal').classList.remove('open');
 });
-document.getElementById('copyUpgradeBtn').addEventListener('click', function() {
+bindClick('copyUpgradeBtn', function() {
   var el = document.getElementById('upgradeCmd');
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
 });
-document.addEventListener('click', function(e) {
-  var btn = e.target.closest('.upgrade-btn');
-  if (!btn) return;
-  var clientName = btn.dataset.name || '';
-  var panelUrl   = location.protocol + '//' + PANEL_ADDR;
-  var ver        = VERSION || 'latest';
-  var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
-    + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
-    + " | bash -s -- "
-    + " --server-url " + panelUrl
-    + " --init-token " + INIT_TOKEN
-    + " --client-name '" + clientName.replace(/'/g, "'\\''") + "'"
-    + " --version " + ver;
-  document.getElementById('upgradeCmd').value = cmd;
-  document.getElementById('upgradeModal').classList.add('open');
+document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var clientName = btn.dataset.name || '';
+    var panelUrl   = location.protocol + '//' + PANEL_ADDR;
+    var ver        = VERSION || 'latest';
+    var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
+      + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
+      + " | bash -s -- "
+      + " --server-url " + panelUrl
+      + " --init-token " + INIT_TOKEN
+      + " --client-name '" + clientName.replace(/'/g, "'\\''") + "'"
+      + " --version " + ver;
+    document.getElementById('upgradeCmd').value = cmd;
+    document.getElementById('upgradeModal').classList.add('open');
+  });
 });
 
-document.getElementById('copyCmdBtn').addEventListener('click', function() {
   var el = document.getElementById('cmdText');
   el.select();
   document.execCommand('copy');
@@ -1470,10 +1489,6 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-	// ── 手动刷新按钮事件监听 ──
-		document.getElementById('reloadBtn').addEventListener('click', function() {
-				location.reload();
-					});
 
 })();
 </script>
