@@ -1,5 +1,7 @@
 package main
 
+const AppVersion = "v0.4.0"
+
 import (
 	"bufio"
 	"crypto/rand"
@@ -46,6 +48,7 @@ type Client struct {
 	RemoteIP    string
 	CurrentTask string
 	UpgradeTo   string
+	Version     string
 }
 
 type Task struct {
@@ -68,11 +71,13 @@ type RegisterReq struct {
 	ClientToken string `json:"client_token"`
 	Name        string `json:"name"`
 	InitToken   string `json:"init_token"`
+	Version     string `json:"version"`
 }
 
 type HeartbeatReq struct {
 	ClientID    string `json:"client_id"`
 	ClientToken string `json:"client_token"`
+	Version     string `json:"version"`
 }
 
 type ResultReq struct {
@@ -221,6 +226,7 @@ func main() {
 	broker := NewBroker()
 	resetStuckTasks(db)
 
+	log.Printf("bwtest server %s starting...", AppVersion)
 	log.Printf("panel=%s%s data=%s db=%s bark=%v",
 		cfg.PanelAddr, cfg.PanelPath, cfg.DataAddr, cfg.DBPath, cfg.BarkURL != "")
 
@@ -327,6 +333,7 @@ func mustInitDB(path string) *sql.DB {
 		);`,
 		`ALTER TABLE clients ADD COLUMN remark TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE clients ADD COLUMN upgrade_to TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE clients ADD COLUMN version TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
@@ -474,8 +481,8 @@ func handleRegister(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 				http.Error(w, "bad init token", 401)
 				return
 			}
-			_, err = db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task) VALUES(?,?,?,?,?,?,?,?)`,
-				req.ClientID, req.Name, "", req.ClientToken, 0, now, realIP(r), "")
+			_, err = db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+				req.ClientID, req.Name, "", req.ClientToken, 0, now, realIP(r), "", req.Version)
 			if err != nil {
 				http.Error(w, err.Error(), 500)
 				return
@@ -516,8 +523,8 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 		if upgradeTo != "" {
 			_, _ = db.Exec(`UPDATE clients SET upgrade_to='' WHERE id=?`, req.ClientID)
 		}
-		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=? WHERE id=?`,
-			time.Now().Format(time.RFC3339), realIP(r), req.ClientID)
+		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, version=? WHERE id=?`,
+			time.Now().Format(time.RFC3339), realIP(r), req.Version, req.ClientID)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upgrade_to": upgradeTo})
 	}
 }
@@ -923,7 +930,7 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		version := getenv("BWPANEL_VERSION", "latest")
+		version := getenv("BWPANEL_VERSION", AppVersion)
 		genName := strings.TrimSpace(r.URL.Query().Get("gen_name"))
 		genRemark := strings.TrimSpace(r.URL.Query().Get("gen_remark"))
 		genVersion := strings.TrimSpace(r.URL.Query().Get("gen_version"))
@@ -1066,11 +1073,12 @@ textarea{resize:vertical;min-height:60px}
   <h2>客户端列表</h2>
   <div class="tbl">
   <table>
-    <thead><tr><th>名称</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
+    <thead><tr><th>名称</th><th>版本</th><th>备注</th><th>已批准</th><th>心跳延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
     <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
       <td>{{.Name}}</td>
+      <td><span class="badge info" style="font-family:monospace">{{.Version}}</span></td>
       <td>{{.Remark}}</td>
       <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
       <td class="ping-col">-</td>
@@ -1867,7 +1875,7 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 		clientID := r.Form.Get("client_id")
 		version  := strings.TrimSpace(r.Form.Get("version"))
 		if version == "" {
-			version = getenv("BWPANEL_VERSION", "latest")
+			version = getenv("BWPANEL_VERSION", AppVersion)
 		}
 		_, _ = db.Exec(`UPDATE clients SET upgrade_to=? WHERE id=?`, version, clientID)
 		w.Header().Set("Content-Type", "application/json")
@@ -1876,7 +1884,7 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 }
 
 func mustClients(db *sql.DB) []Client {
-	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to FROM clients`)
+	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version FROM clients`)
 	if err != nil {
 		return nil
 	}
@@ -1885,7 +1893,7 @@ func mustClients(db *sql.DB) []Client {
 	for rows.Next() {
 		var c Client
 		var approved int
-		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo)
+		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version)
 		c.Approved = approved == 1
 		out = append(out, c)
 	}

@@ -30,11 +30,13 @@ type RegisterReq struct {
 	ClientToken string `json:"client_token"`
 	Name        string `json:"name"`
 	InitToken   string `json:"init_token"`
+	Version     string `json:"version"`
 }
 
 type HeartbeatReq struct {
 	ClientID    string `json:"client_id"`
 	ClientToken string `json:"client_token"`
+	Version     string `json:"version"`
 }
 
 type Task struct {
@@ -89,6 +91,8 @@ func main() {
 		log.Fatal(err)
 	}
 
+	log.Printf("bwagent %s starting...", getenv("BWAGENT_VERSION", "unknown"))
+
 	// register with retry
 	for {
 		if err := register(cfg); err != nil {
@@ -142,6 +146,7 @@ func register(cfg *Config) error {
 		ClientToken: cfg.ClientToken,
 		Name:        cfg.Name,
 		InitToken:   cfg.InitToken,
+		Version:     getenv("BWAGENT_VERSION", "unknown"),
 	}, nil)
 }
 
@@ -156,6 +161,7 @@ func heartbeatLoop(cfg *Config) {
 		_ = postJSON(cfg.ServerURL+"/api/heartbeat", HeartbeatReq{
 			ClientID:    cfg.ClientID,
 			ClientToken: cfg.ClientToken,
+			Version:     getenv("BWAGENT_VERSION", "unknown"),
 		}, &resp)
 		if resp.UpgradeTo != "" {
 			currentVer := getenv("BWAGENT_VERSION", "")
