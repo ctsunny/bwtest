@@ -25,7 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var Version = "v0.4.13"
+var Version = "v0.4.14"
 
 type Config struct {
 	PanelAddr  string
@@ -1775,7 +1775,6 @@ bindClick('confirmPushUpgradeBtn', function() {
   apiFetch('/client/upgrade',
     'client_id=' + encodeURIComponent(pushUpgradeClientId) +
     '&version='   + encodeURIComponent(ver))
-    .then(function(r) { return r.json(); })
     .then(function(d) {
       document.getElementById('pushUpgradeModal').classList.remove('open');
       alert('✅ 已推送更新指令（版本: ' + (d.version || ver) + '）\n客户端将在下次心跳后自动升级（约20秒内）。');
