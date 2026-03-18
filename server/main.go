@@ -26,7 +26,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var Version = "v0.4.15"
+var Version = "v0.4.16"
 
 type Config struct {
 	PanelAddr  string

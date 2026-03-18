@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-var Version = "v0.4.15"
+var Version = "v0.4.16"
 
 type Config struct {
 	ServerURL   string `json:"server_url"`
