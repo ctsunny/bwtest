@@ -1832,7 +1832,7 @@ func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.Handler
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		taskID := r.Form.Get("task_id")
-		_, _ = db.Exec(`DELETE FROM tasks WHERE id=? AND status NOT IN ('running','stopping')`, taskID)
+		_, _ = db.Exec(`DELETE FROM tasks WHERE id=?`, taskID)
 		broker.Publish("tasks")
 		// 支持 fetch 调用（返回 JSON）和传统 form 跳转
 		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
