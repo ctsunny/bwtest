@@ -972,65 +972,151 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>带宽测试面板</title>
 <style>
-:root{--bg:#f5f7fb;--card:#fff;--border:#e5e7eb;--text:#111827;--muted:#6b7280;--primary:#2563eb;--ph:#1d4ed8;--ok-bg:#dcfce7;--ok:#166534;--no-bg:#fee2e2;--no:#991b1b;--run-bg:#dbeafe;--run:#1d4ed8;--done-bg:#dcfce7;--done:#166534;--pend-bg:#f3f4f6;--pend:#374151;--warn-bg:#fef3c7;--warn:#92400e;--stop-bg:#ffedd5;--stop:#9a3412}
-*{box-sizing:border-box}
-body{margin:0;padding:20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
-.wrap{max-width:1400px;margin:0 auto}
-.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
-h1{margin:0 0 4px;font-size:36px}h2{margin:0 0 14px;font-size:20px}p{margin:0;color:var(--muted);font-size:14px}
-.ver-badge{display:inline-block;background:#dbeafe;color:#1d4ed8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;margin-left:10px;vertical-align:middle}
-.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
-.note{font-size:13px;color:var(--muted)}
-#liveStatus{font-size:13px;color:var(--muted)}
-button,.btn{border:none;border-radius:9px;padding:9px 14px;background:var(--primary);color:#fff;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;white-space:nowrap}
-button:hover,.btn:hover{background:var(--ph)}
-button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
-button.danger{background:#ef4444;color:#fff}button.danger:hover{background:#dc2626}
-button.warn{background:#f59e0b;color:#fff}button.warn:hover{background:#d97706}
-button.info{background:#0891b2;color:#fff}button.info:hover{background:#0e7490}
-.tbl{overflow:auto}
-table{width:100%;border-collapse:collapse}
-th,td{padding:10px 9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;font-size:13px}
-th{background:#f9fafb;font-weight:700}
-.badge{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700}
-.ok{background:var(--ok-bg);color:var(--ok)}.no{background:var(--no-bg);color:var(--no)}
-.running{background:var(--run-bg);color:var(--run)}.done{background:var(--done-bg);color:var(--done)}
-.pending{background:var(--pend-bg);color:var(--pend)}.stopped{background:var(--warn-bg);color:var(--warn)}
-.stopping{background:var(--stop-bg);color:var(--stop)}
-.ping-ok{color:#16a34a;font-weight:700}.ping-warn{color:#d97706;font-weight:700}.ping-dead{color:#dc2626;font-weight:700}
-.grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
-.dur-wrap{display:flex;gap:6px}.dur-wrap input{flex:1}.dur-wrap select{width:90px}
-input,select,textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:9px;font-size:13px;background:#fff}
-textarea{resize:vertical;min-height:60px}
-.tip{margin-top:10px;font-size:12px;color:var(--muted)}
-.copy-box{display:flex;gap:8px;align-items:center;margin-top:10px}
-.copy-box input{font-family:monospace;font-size:12px;background:#f9fafb}
-.gen-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center;pointer-events:none}
-.modal-overlay.open{display:flex;pointer-events:auto}
-.modal-inner{background:#fff;border-radius:14px;padding:22px;width:min(600px,95vw)}
-.modal-inner input{font-family:monospace;font-size:12px;background:#f9fafb}
-@media(max-width:960px){.grid{grid-template-columns:1fr 1fr}.gen-grid{grid-template-columns:1fr 1fr}}
-@media(max-width:640px){body{padding:10px}.grid,.gen-grid{grid-template-columns:1fr}h1{font-size:26px}}
+:root {
+  --bg: #f5f7fb;
+  --card: #ffffff;
+  --card-glass: rgba(255, 255, 255, 0.85);
+  --border: #e5e7eb;
+  --text: #111827;
+  --muted: #6b7280;
+  --primary: #2563eb;
+  --primary-glow: rgba(37, 99, 235, 0.4);
+  --ok: #16a34a;
+  --no: #dc2626;
+  --run: #2563eb;
+  --pend: #4b5563;
+  --stop: #ea580c;
+  --warn: #d97706;
+  --radius: 16px;
+  --shadow: 0 4px 12px rgba(0,0,0,0.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --card-glass: rgba(30, 41, 59, 0.8);
+    --border: #334155;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --primary: #3b82f6;
+    --primary-glow: rgba(59, 130, 246, 0.5);
+  }
+}
+* { box-sizing: border-box; transition: background-color 0.2s, border-color 0.2s, transform 0.1s; }
+body { margin: 0; padding: 20px; font-family: 'Inter', -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+.wrap { max-width: 1400px; margin: 0 auto; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+}
+.card-glass { background: var(--card-glass); }
+
+h1 { margin: 0 0 4px; font-size: 32px; font-weight: 800; letter-spacing: -0.025em; }
+h2 { margin: 0 0 16px; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card { padding: 20px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--card); }
+.stat-val { font-size: 28px; font-weight: 800; margin-top: 4px; }
+.stat-label { color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; align-items: center; justify-content: space-between; }
+button, .btn {
+  border: none; border-radius: 10px; padding: 10px 16px; background: var(--primary); color: #fff; cursor: pointer;
+  font-size: 14px; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+button:hover, .btn:hover { background: var(--primary); filter: brightness(1.1); transform: translateY(-1px); }
+button:active, .btn:active { transform: scale(0.98); }
+button.sec { background: var(--border); color: var(--text); }
+button.danger { background: var(--no); }
+button.warn { background: var(--warn); }
+button.info { background: #0891b2; }
+
+.tbl-wrap { overflow-x: auto; margin: 0 -10px; padding: 0 10px; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; }
+th { text-align: left; padding: 14px 12px; font-size: 12px; font-weight: 700; color: var(--muted); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.05em; }
+td { padding: 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+tr:hover td { background: rgba(0,0,0,0.02); }
+
+.badge { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.badge.running { background: #dbeafe; color: #1e40af; }
+.badge.done { background: #dcfce7; color: #166534; }
+.badge.pending { background: #f1f5f9; color: #475569; }
+.badge.stopping { background: #ffedd5; color: #9a3412; }
+
+.progress-bar-container { width: 120px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; position: relative; }
+.progress-bar-fill { height: 100%; background: var(--run); width: 0%; border-radius: 3px; box-shadow: 0 0 8px var(--primary-glow); transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; align-items: flex-end; }
+input, select, textarea {
+  width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); font-size: 14px;
+}
+input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px var(--primary-glow); }
+
+.modal-overlay {
+  display: flex; visibility: hidden; opacity: 0; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000;
+  align-items: center; justify-content: center; backdrop-filter: blur(4px); transition: 0.2s;
+}
+.modal-overlay.open { visibility: visible; opacity: 1; }
+.modal-inner {
+  background: var(--card); border-radius: var(--radius); padding: 32px; width: min(550px, 95vw); transform: scale(0.9); transition: 0.2s;
+  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04);
+}
+.modal-overlay.open .modal-inner { transform: scale(1); }
+
+@media (max-width: 768px) {
+  body { padding: 12px; }
+  .stats-grid { grid-template-columns: 1fr 1fr; }
+  th { display: none; }
+  td { display: block; padding: 6px 12px; border: none; text-align: right; }
+  td::before { content: attr(data-label); float: left; font-weight: 700; color: var(--muted); }
+  tr { display: block; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 12px; padding: 12px 0; }
+  .grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<div class="card">
+<div class="card card-glass">
   <h1>带宽测试面板 <span class="ver-badge">{{.Version}}</span></h1>
-  <p>客户端管理、任务下发和实时状态查看。</p>
-  <div class="toolbar" style="display:flex; justify-content:space-between; width:100%">
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-      <button type="button" id="reloadBtn">手动刷新</button>
-      <button type="button" class="sec" id="toggleHistoryBtn">显示历史任务</button>
-      <span id="liveStatus" class="note">数据每 5 秒自动刷新。</span>
+  <p>实时监控、分布式测速与任务分发平台。</p>
+  <div class="toolbar">
+    <div style="display:flex; gap:8px; align-items:center">
+      <button type="button" id="reloadBtn">🔄 手动刷新</button>
+      <button type="button" class="sec" id="toggleHistoryBtn">📜 历史任务</button>
+      <span id="liveStatus" class="note">数据自动同步中...</span>
     </div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-      <button type="button" class="btn info" onclick="document.getElementById('genModal').classList.add('open')">➕ 增加客户端</button>
-      <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ Bark 设置</a>
-      <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器 Linux</a>
+    <div style="display:flex; gap:8px">
+      <button type="button" class="info" onclick="document.getElementById('genModal').classList.add('open')">➕ 接入新客户端</button>
+      <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ 设置</a>
+      <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器</a>
     </div>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">在线客户端</div>
+    <div id="statOnline" class="stat-val">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">运行中任务</div>
+    <div id="statRunning" class="stat-val">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">待处理请求</div>
+    <div id="statPending" class="stat-val">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">总吞吐量</div>
+    <div id="statTraffic" class="stat-val">-</div>
   </div>
 </div>
 
@@ -1123,36 +1209,28 @@ textarea{resize:vertical;min-height:60px}
 </div>
 
 <div class="card">
-  <h2>客户端列表</h2>
-  <div class="tbl">
+  <h2>🖥 客户端列表</h2>
+  <div class="tbl-wrap">
   <table>
-    <thead><tr><th>名称</th><th>版本</th><th>备注</th><th>已批准</th><th>网络延迟</th><th>最后心跳</th><th>远程 IP</th><th>当前任务</th><th>操作</th></tr></thead>
+    <thead><tr><th>名称</th><th>版本</th><th>备注</th><th>批准</th><th>延迟</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th></tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
     <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
-      <td>{{.Name}}</td>
-      <td><span class="badge info" style="font-family:monospace">{{.Version}}</span></td>
-      <td>{{.Remark}}</td>
-      <td>{{if .Approved}}<span class="badge ok">是</span>{{else}}<span class="badge no">否</span>{{end}}</td>
-      <td class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
-      <td class="lastseen-col">{{.LastSeen | shortTime}}</td>
-      <td>{{.RemoteIP}}</td>
-      <td class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
-      <td>
+      <td data-label="名称">{{.Name}}</td>
+      <td data-label="版本"><span class="badge running" style="font-family:monospace">{{.Version}}</span></td>
+      <td data-label="备注">{{.Remark}}</td>
+      <td data-label="批准">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
+      <td data-label="延迟" class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
+      <td data-label="心跳" class="lastseen-col">{{.LastSeen | shortTime}}</td>
+      <td data-label="IP">{{.RemoteIP}}</td>
+      <td data-label="任务" class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
+      <td data-label="操作">
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-	        {{if (not .Approved)}}
-	        <form method="post" action="{{$.PanelPath}}/approve" style="margin:0">
-	          <input type="hidden" name="client_id" value="{{.ID}}">
-	          <button type="submit">批准</button>
-	        </form>
-	        {{end}}
-        <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
-        <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级命令</button>
-        <button type="button" class="warn push-upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">推送更新</button>
-        <form method="post" action="{{$.PanelPath}}/client/delete" style="margin:0;display:inline-block" onsubmit="return confirm('确认删除此客户端？');">
-          <input type="hidden" name="client_id" value="{{.ID}}">
-          <button type="submit" class="danger">删除</button>
-        </form>
+	        {{if (not .Approved)}}<button type="button" class="approve-btn" data-id="{{.ID}}">批准</button>{{end}}
+          <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
+          <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级码</button>
+          <button type="button" class="warn push-upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">推送</button>
+          <button type="button" class="danger del-client-btn" data-id="{{.ID}}">删除</button>
         </div>
       </td>
     </tr>
@@ -1160,26 +1238,19 @@ textarea{resize:vertical;min-height:60px}
     </tbody>
   </table>
   </div>
-  <div class="tip">网络延迟：基于最近一次心跳请求测量。超过3分钟失去连接心跳时间将标红。</div>
 </div>
 
 <div class="card">
   <h2>创建任务</h2>
-  <form method="post" action="{{.PanelPath}}/task/create">
+  <form id="taskForm" method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
-        <label class="note" style="display:flex; justify-content:space-between"><span>选择客户端（可多选）</span> <span style="font-size:11px;color:var(--primary);cursor:pointer" onclick="selectAll()">全选</span></label>
+        <label class="note" style="display:flex; justify-content:space-between"><span>选择客户端（可多选）</span> <span id="selectAllBtn" style="font-size:11px;color:var(--primary);cursor:pointer">全选</span></label>
         <select id="clientSelectBox" name="client_id" multiple required style="margin-top:4px; height:80px">
           {{range .ApprovedClients}}
           <option value="{{.ID}}" {{if eq .ID $.DefaultClientID}}selected{{end}}>{{.Name}}</option>
           {{end}}
         </select>
-        <script>
-          function selectAll() {
-            var s = document.getElementById('clientSelectBox');
-            for(var i=0; i<s.options.length; i++){ s.options[i].selected = true; }
-          }
-        </script>
       </div>
       <div>
         <label class="note">模式</label>
@@ -1190,11 +1261,11 @@ textarea{resize:vertical;min-height:60px}
         </select>
       </div>
       <div>
-        <label class="note">上传速度 Mbps</label>
+        <label class="note">上传 Mbps</label>
         <input name="up_mbps" value="10" style="margin-top:4px">
       </div>
       <div>
-        <label class="note">下载速度 Mbps</label>
+        <label class="note">下载 Mbps</label>
         <input name="down_mbps" value="10" style="margin-top:4px">
       </div>
       <div>
@@ -1211,11 +1282,17 @@ textarea{resize:vertical;min-height:60px}
         </div>
       </div>
       <div style="align-self:end">
-        <button type="submit" style="width:100%">创建任务</button>
+        <button type="submit" id="createTaskBtn" style="width:100%">创建任务</button>
       </div>
     </div>
   </form>
-  <div class="tip">提示：按住 Ctrl 或 Shift 点击客户端名称可批量多选下发任务；上传/下载速度单位为 Mbps。</div>
+  <div class="tip">提示：按住 Ctrl 或 Shift 点击客户端名称可批量多选下发任务。</div>
+  <div style="margin-top:16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+    <span class="note" style="font-weight:700">⚡ 快速测速:</span>
+    <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (10M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="download">📥 1min 下载 (10M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="both">🔄 1min 双向 (10M)</button>
+  </div>
 </div>
 
 
@@ -1223,44 +1300,31 @@ textarea{resize:vertical;min-height:60px}
 <!-- 正在运行的任务 -->
 <div class="card">
   <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
-  <div class="tbl">
+  <div class="tbl-wrap">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>任务进度</th><th>网络延迟</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>状态</th><th>进度</th><th>延迟</th><th>已传</th><th>已拉</th><th>日期</th><th>操作</th></tr></thead>
     <tbody id="runningTaskBody">
     {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
-      <td>{{index $.ClientNames .ClientID}}</td>
-      <td>{{.Mode}}</td>
-      <td>{{.UpMbps}}</td>
-      <td>{{.DownMbps}}</td>
-      <td>{{.DurationSec | fmtDurationHTML}}</td>
-      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
-      <td class="progress-col">{{buildProgressHTML .}}</td>
-      <td class="rtt-col" data-client-id="{{.ClientID}}">-</td>
-      <td class="up-col">-</td>
-      <td class="down-col">-</td>
-      <td>{{.StartedAt | shortTime}}</td>
-	      <td>
-	        {{if eq .Status "running"}}
-	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认停止此任务？')">
-	          <input type="hidden" name="task_id" value="{{.ID}}">
-	          <button type="submit" class="danger stop-btn">停止</button>
-	        </form>
-	        {{else if eq .Status "pending"}}
-	        <form method="post" action="{{$.PanelPath}}/task/stop" style="margin:0" onsubmit="return confirm('确认取消此待执行任务？')">
-	          <input type="hidden" name="task_id" value="{{.ID}}">
-	          <button type="submit" class="warn stop-btn">取消</button>
-	        </form>
-	        {{else}}
-	        <form method="post" action="{{$.PanelPath}}/task/delete" style="margin:0" onsubmit="return confirm('强制删除此卡住的任务？')">
-	          <input type="hidden" name="task_id" value="{{.ID}}">
-	          <button type="submit" class="danger">删除</button>
-	        </form>
-	        {{end}}
-	      </td>
+      <td data-label="客户端">{{index $.ClientNames .ClientID}}</td>
+      <td data-label="模式">{{.Mode}}</td>
+      <td data-label="上传">{{.UpMbps}}</td>
+      <td data-label="下载">{{.DownMbps}}</td>
+      <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
+      <td data-label="状态"><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td data-label="进度" class="progress-col">{{buildProgressHTML .}}</td>
+      <td data-label="延迟" class="rtt-col" data-client-id="{{.ClientID}}">-</td>
+      <td data-label="已传" class="up-col">-</td>
+      <td data-label="已拉" class="down-col">-</td>
+      <td data-label="日期">{{.StartedAt | shortTime}}</td>
+      <td data-label="操作">
+        {{if eq .Status "running"}}<button type="button" class="danger stop-btn" data-task-id="{{.ID}}">🛑 停止</button>
+        {{else if eq .Status "pending"}}<button type="button" class="warn stop-btn" data-task-id="{{.ID}}">✖ 取消</button>
+        {{else}}<button type="button" class="danger force-del-btn" data-task-id="{{.ID}}">🗑 强制删除</button>{{end}}
+      </td>
     </tr>
     {{end}}
-	    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>{{end}}
+	    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="12" style="text-align:center;color:var(--muted);padding:40px">暂无正在执行的任务</td></tr>{{end}}
     </tbody>
   </table>
   </div>
@@ -1274,31 +1338,31 @@ textarea{resize:vertical;min-height:60px}
       <button type="submit" class="sec danger">清空历史</button>
     </form>
   </div>
-  <div class="tbl">
+  <div class="tbl-wrap">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>状态</th><th>已传</th><th>已拉</th><th>开始</th><th>结束</th><th>操作</th></tr></thead>
     <tbody id="historyTaskBody">
     {{range .HistoryTasks}}
     <tr data-task-id="{{.ID}}">
-      <td>{{index $.ClientNames .ClientID}}</td>
-      <td>{{.Mode}}</td>
-      <td>{{.UpMbps}}</td>
-      <td>{{.DownMbps}}</td>
-      <td>{{.DurationSec | fmtDurationHTML}}</td>
-      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
-      <td>{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
-      <td>{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
-      <td>{{.StartedAt | shortTime}}</td>
-      <td>{{.FinishedAt | shortTime}}</td>
-	      <td>
-	        <form method="post" action="{{$.PanelPath}}/task/delete" style="margin:0" onsubmit="return confirm('确认删除此任务记录？')">
-	          <input type="hidden" name="task_id" value="{{.ID}}">
-	          <button type="submit" class="danger">删除</button>
-	        </form>
-	      </td>
+      <td data-label="客户端">{{index $.ClientNames .ClientID}}</td>
+      <td data-label="模式">{{.Mode}}</td>
+      <td data-label="上传">{{.UpMbps}}</td>
+      <td data-label="下载">{{.DownMbps}}</td>
+      <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
+      <td data-label="状态"><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td data-label="已传">{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
+      <td data-label="已拉">{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
+      <td data-label="开始">{{.StartedAt | shortTime}}</td>
+      <td data-label="结束">{{.FinishedAt | shortTime}}</td>
+      <td data-label="操作">
+        <div style="display:flex;gap:4px">
+          <button type="button" class="danger del-task-btn" data-task-id="{{.ID}}">🗑 删除</button>
+          <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}">🔄 克隆</button>
+        </div>
+      </td>
     </tr>
     {{end}}
-	    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>{{end}}
+	    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:40px">暂无历史记录</td></tr>{{end}}
     </tbody>
   </table>
   </div>
@@ -1313,15 +1377,21 @@ var INIT_TOKEN  = {{.InitTokenJS}};
 var PANEL_ADDR  = location.host;
 var VERSION     = {{.VersionJS}};
 
-// ── 通用 fetch 封装，自动带 credentials ──
+// ── 通用 fetch 封装，强制返回 JSON 并自动带 credentials ──
 function apiFetch(path, body) {
   var opts = {
     method: 'POST',
     credentials: 'include',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'}
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': 'application/json'
+    }
   };
   if (body) opts.body = body;
-  return fetch(PANEL_PATH + path, opts);
+  return fetch(PANEL_PATH + path, opts).then(function(r) {
+    if (!r.ok) return r.text().then(function(t) { throw new Error(t || r.statusText); });
+    return r.json();
+  });
 }
 
 function bindClick(id, fn) {
@@ -1398,42 +1468,38 @@ function fmtDuration(secs) {
 }
 
 function buildProgress(t) {
-  if (t.status === 'pending') return '<span class="note">0%</span>';
+  if (t.status === 'pending') return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:0%%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--muted)">等待中 (0%%)</div>';
   if (t.status !== 'running' && t.status !== 'stopping') return '-';
   if (!t.started_at) return '-';
   var st = new Date(t.started_at).getTime();
   if (isNaN(st)) return '-';
   var elapsed = (Date.now() - st) / 1000;
-  if (elapsed < 0) return '0%';
-  var pct = (elapsed / t.duration_sec) * 100;
-  if (pct > 100) pct = 100;
-  return pct.toFixed(1) + '%';
+  var pct = Math.min((elapsed / t.duration_sec) * 100, 100);
+  return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:'+pct.toFixed(1)+'%%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--primary)">'+pct.toFixed(1)+'%%</div>';
 }
 
 // 动态行：停止按钮输出为 form，保证无 JS 也可提交
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
-	var stopBtn = t.status === 'running'
-	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')">'
-	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	    + '<button type="submit" class="danger stop-btn">停止</button></form>'
-	  : t.status === 'pending'
-	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认取消此待执行任务？\')">'
-	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	    + '<button type="submit" class="warn stop-btn">取消</button></form>'
-	  : '<form method="post" action="' + PANEL_PATH + '/task/delete" style="margin:0" onsubmit="return confirm(\'强制删除此卡住的任务？\')">'
-	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	    + '<button type="submit" class="danger">删除</button></form>';
+  var stopBtn = t.status === 'running'
+    ? '<button type="button" class="danger stop-btn" data-task-id="'+t.id+'">🛑 停止</button>'
+    : t.status === 'pending'
+    ? '<button type="button" class="warn stop-btn" data-task-id="'+t.id+'">✖ 取消</button>'
+    : '<button type="button" class="danger force-del-btn" data-task-id="'+t.id+'">🗑 强制删除</button>';
+  
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
-    + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
-    + '<td>' + fmtDuration(t.duration_sec) + '</td>'
-    + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
-    + '<td class="progress-col">' + buildProgress(t) + '</td>'
-    + '<td class="rtt-col" data-client-id="' + t.client_id + '">-</td>'
-    + '<td class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
-    + '<td class="down-col">' + fmtGB(t.download_bytes) + '</td>'
-    + '<td>' + fmtShortTime(t.started_at) + '</td>'
-    + '<td>' + stopBtn + '</td>'
+    + '<td data-label="客户端">' + name + '</td>'
+    + '<td data-label="模式">' + t.mode + '</td>'
+    + '<td data-label="上传">' + t.up_mbps + '</td>'
+    + '<td data-label="下载">' + t.down_mbps + '</td>'
+    + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
+    + '<td data-label="状态"><span class="badge ' + t.status + '">' + t.status + '</span></td>'
+    + '<td data-label="进度" class="progress-col">' + buildProgress(t) + '</td>'
+    + '<td data-label="网络" class="rtt-col" data-client-id="' + t.client_id + '">-</td>'
+    + '<td data-label="已传" class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
+    + '<td data-label="已拉" class="down-col">' + fmtGB(t.download_bytes) + '</td>'
+    + '<td data-label="开始">' + fmtShortTime(t.started_at) + '</td>'
+    + '<td data-label="操作">' + stopBtn + '</td>'
     + '</tr>';
 }
 
@@ -1441,17 +1507,41 @@ function buildRunningRow(t) {
 function buildHistoryRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   return '<tr data-task-id="' + t.id + '">'
-    + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
-    + '<td>' + fmtDuration(t.duration_sec) + '</td>'
-    + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
-    + '<td>' + fmtGB(t.upload_bytes) + '</td>'
-    + '<td>' + fmtGB(t.download_bytes) + '</td>'
-    + '<td>' + fmtShortTime(t.started_at) + '</td>'
-    + '<td>' + fmtShortTime(t.finished_at) + '</td>'
-	  + '<td><form method="post" action="' + PANEL_PATH + '/task/delete" style="margin:0" onsubmit="return confirm(\'确认删除此任务记录？\')">'
-	  + '<input type="hidden" name="task_id" value="' + t.id + '">'
-	  + '<button type="submit" class="danger">删除</button></form></td>'
-	  + '</tr>';
+    + '<td data-label="客户端">' + name + '</td>'
+    + '<td data-label="模式">' + t.mode + '</td>'
+    + '<td data-label="上传">' + t.up_mbps + '</td>'
+    + '<td data-label="下载">' + t.down_mbps + '</td>'
+    + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
+    + '<td data-label="状态"><span class="badge ' + t.status + '">' + t.status + '</span></td>'
+    + '<td data-label="已传">' + fmtGB(t.upload_bytes) + '</td>'
+    + '<td data-label="已拉">' + fmtGB(t.download_bytes) + '</td>'
+    + '<td data-label="开始">' + fmtShortTime(t.started_at) + '</td>'
+    + '<td data-label="结束">' + fmtShortTime(t.finished_at) + '</td>'
+    + '<td data-label="操作">'
+    + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
+    + '</td>'
+    + '</tr>';
+}
+
+function updateStats(data) {
+  var clients = data.clients || [];
+  var tasks = data.tasks || [];
+  var online = clients.filter(function(c) {
+    if (!c.last_seen) return false;
+    return (Date.now() - new Date(c.last_seen).getTime()) < 180000;
+  }).length;
+  var running = tasks.filter(function(t) { return t.status === 'running'; }).length;
+  var pending = tasks.filter(function(t) { return t.status === 'pending'; }).length;
+  var totalTraffic = tasks.reduce(function(a, b) { return a + (b.upload_bytes || 0) + (b.download_bytes || 0); }, 0);
+
+  var elOnline = document.getElementById('statOnline');
+  var elRunning = document.getElementById('statRunning');
+  var elPending = document.getElementById('statPending');
+  var elTraffic = document.getElementById('statTraffic');
+  if (elOnline) elOnline.textContent = online;
+  if (elRunning) elRunning.textContent = running;
+  if (elPending) elPending.textContent = pending;
+  if (elTraffic) elTraffic.textContent = fmtGB(totalTraffic);
 }
 
 function pollData() {
@@ -1521,11 +1611,11 @@ function pollData() {
             var isWarn   = curClass.indexOf('warn') !== -1;
 
             if (wantRunning && (!hasBtn || !isDanger)) {
-              opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认停止此任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="danger stop-btn">停止</button></form>';
+              opCell.innerHTML = '<button type="button" class="danger stop-btn" data-task-id="'+t.id+'">🛑 停止</button>';
             } else if (wantPending && (!hasBtn || !isWarn)) {
-              opCell.innerHTML = '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认取消此待执行任务？\')"><input type="hidden" name="task_id" value="' + t.id + '"><button type="submit" class="warn stop-btn">取消</button></form>';
+              opCell.innerHTML = '<button type="button" class="warn stop-btn" data-task-id="'+t.id+'">✖ 取消</button>';
             } else if (!wantRunning && !wantPending && hasBtn) {
-              opCell.innerHTML = '<span class="note">-</span>';
+              opCell.innerHTML = '<button type="button" class="danger force-del-btn" data-task-id="'+t.id+'">🗑 强制删除</button>';
             }
           }
         });
@@ -1549,8 +1639,9 @@ function pollData() {
       });
       tickPing();
 
+      updateStats(data);
       var hint = document.getElementById('taskRefreshHint');
-      if (hint) hint.textContent = '(上次刷新: ' + new Date().toLocaleTimeString() + ')';
+      if (hint) hint.textContent = '(上次同步: ' + new Date().toLocaleTimeString() + ')';
     })
     .catch(function(){});
 }
@@ -1572,41 +1663,68 @@ es.onerror = function() {
 
 // ── 编辑客户端弹窗 ──
 var editClientId = '';
+var pushUpgradeClientId = '';
+function delegate(id, className, fn) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('click', function(e) {
+    var target = e.target;
+    while (target && target !== el) {
+      if (target.classList && target.classList.contains(className)) {
+        fn(target);
+        return;
+      }
+      target = target.parentNode;
+    }
+  });
+}
 document.getElementById('closeEditBtn').addEventListener('click', function() {
   document.getElementById('editModal').classList.remove('open');
 });
-document.querySelector('#clientBody').addEventListener('click', function(e) {
-  var target = e.target;
-  if (!target || !target.classList) return;
 
-  if (target.classList.contains('edit-btn')) {
-    editClientId = target.dataset.id;
-    document.getElementById('editName').value   = target.dataset.name || '';
-    document.getElementById('editRemark').value = target.dataset.remark || '';
-    document.getElementById('editModal').classList.add('open');
-  }
+delegate('clientBody', 'edit-btn', function(target) {
+  editClientId = target.dataset.id;
+  document.getElementById('editName').value   = target.dataset.name || '';
+  document.getElementById('editRemark').value = target.dataset.remark || '';
+  document.getElementById('editModal').classList.add('open');
+});
 
-  if (target.classList.contains('upgrade-btn')) {
-    var clientName = target.dataset.name || '';
-    var panelUrl   = location.protocol + '//' + PANEL_ADDR;
-    var ver        = VERSION || 'latest';
-    var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
-      + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
-      + " | bash -s -- "
-      + " --server-url " + panelUrl
-      + " --init-token " + INIT_TOKEN
-      + " --client-name '" + clientName.replace(/'/g, "'\\''") + "'"
-      + " --version " + ver;
-    document.getElementById('upgradeCmd').value = cmd;
-    document.getElementById('upgradeModal').classList.add('open');
-  }
+delegate('clientBody', 'upgrade-btn', function(target) {
+  var clientName = target.dataset.name || '';
+  var panelUrl   = location.protocol + '//' + PANEL_ADDR;
+  var cmd = "curl --proto '=https' --tlsv1.2 -fsSL "
+    + "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh"
+    + " | bash -s -- "
+    + " --server-url " + panelUrl
+    + " --init-token " + INIT_TOKEN
+    + " --client-name '" + clientName.replace(/'/g, "'\\''") + "'"
+    + " --version " + (VERSION || 'latest');
+  document.getElementById('upgradeCmd').value = cmd;
+  document.getElementById('upgradeModal').classList.add('open');
+});
 
-  if (target.classList.contains('push-upgrade-btn')) {
-    pushUpgradeClientId = target.dataset.id || '';
-    document.getElementById('pushUpgradeClientName').value = target.dataset.name || pushUpgradeClientId;
-    document.getElementById('pushUpgradeVersion').value = VERSION || 'latest';
-    document.getElementById('pushUpgradeModal').classList.add('open');
-  }
+delegate('clientBody', 'push-upgrade-btn', function(target) {
+  pushUpgradeClientId = target.dataset.id || '';
+  document.getElementById('pushUpgradeClientName').value = target.dataset.name || pushUpgradeClientId;
+  document.getElementById('pushUpgradeVersion').value = VERSION || 'latest';
+  document.getElementById('pushUpgradeModal').classList.add('open');
+});
+
+function taskAction(path, taskId, msg) {
+  if (msg && !confirm(msg)) return;
+  apiFetch(path, 'task_id=' + encodeURIComponent(taskId))
+    .then(function() { pollData(); })
+    .catch(function(err) { alert('操作失败: ' + err); });
+}
+
+delegate('runningTaskBody', 'stop-btn', function(target) {
+  taskAction('/task/stop', target.dataset.taskId, '确认停止此任务？');
+});
+delegate('runningTaskBody', 'force-del-btn', function(target) {
+  taskAction('/task/delete', target.dataset.taskId, '确认强制删除此任务？');
+});
+delegate('historyTaskBody', 'del-task-btn', function(target) {
+  taskAction('/task/delete', target.dataset.taskId, '确认删除此记录？');
 });
 
 bindClick('closePushUpgradeBtn', function() {
@@ -1630,6 +1748,34 @@ bindClick('confirmPushUpgradeBtn', function() {
     .finally(function() { confirmBtn.disabled = false; });
 });
 
+delegate('clientBody', 'approve-btn', function(target) {
+  apiFetch('/approve', 'client_id=' + encodeURIComponent(target.dataset.id))
+    .then(function() { pollData(); })
+    .catch(function(err) { alert('批准失败: ' + err); });
+});
+
+delegate('clientBody', 'del-client-btn', function(target) {
+  if (!confirm('确认彻底删除此客户端？')) return;
+  apiFetch('/client/delete', 'client_id=' + encodeURIComponent(target.dataset.id))
+    .then(function() { pollData(); })
+    .catch(function(err) { alert('删除失败: ' + err); });
+});
+
+delegate('historyTaskBody', 'clone-btn', function(target) {
+    var box = document.getElementById('clientSelectBox');
+    if (!box) return;
+    for(var i=0; i<box.options.length; i++) {
+        box.options[i].selected = (box.options[i].value === target.dataset.client);
+    }
+    document.querySelector('select[name="mode"]').value = target.dataset.mode;
+    document.querySelector('input[name="up_mbps"]').value = target.dataset.up;
+    document.querySelector('input[name="down_mbps"]').value = target.dataset.down;
+    document.querySelector('input[name="duration_val"]').value = target.dataset.dur;
+    document.querySelector('select[name="duration_unit"]').value = 'sec';
+    var form = document.querySelector('form[action$="/task/create"]');
+    if (form) window.scrollTo({ top: form.offsetTop - 100, behavior: 'smooth' });
+});
+
 document.getElementById('saveEditBtn').addEventListener('click', function() {
   var name   = document.getElementById('editName').value.trim();
   var remark = document.getElementById('editRemark').value.trim();
@@ -1640,15 +1786,14 @@ document.getElementById('saveEditBtn').addEventListener('click', function() {
     'client_id=' + encodeURIComponent(editClientId) +
     '&name='      + encodeURIComponent(name) +
     '&remark='    + encodeURIComponent(remark))
-    .then(function(r) {
-      if (!r.ok) throw new Error(r.status);
+    .then(function() {
       document.getElementById('editModal').classList.remove('open');
-      location.reload();
+      pollData();
     })
     .catch(function(err) {
       alert('保存失败: ' + err);
-      saveBtn.disabled = false;
-    });
+    })
+    .finally(function() { saveBtn.disabled = false; });
 });
 bindClick('closeUpgradeBtn', function() {
   document.getElementById('upgradeModal').classList.remove('open');
@@ -1701,7 +1846,42 @@ if (toggleHistoryBtnEl) toggleHistoryBtnEl.addEventListener('click', function() 
   historyOpen = !historyOpen;
   var card = document.getElementById('historyCard');
   if (card) card.style.display = historyOpen ? 'block' : 'none';
-  this.textContent = historyOpen ? '\u9690\u85cf\u5386\u53f2\u4efb\u52a1' : '\u663e\u793a\u5386\u53f2\u4efb\u52a1';
+  this.textContent = historyOpen ? '📜 隐藏历史任务' : '📜 显示历史任务';
+});
+
+var taskForm = document.getElementById('taskForm');
+if (taskForm) taskForm.addEventListener('submit', function(e) {
+  e.preventDefault();
+  var fd = new FormData(taskForm);
+  var body = new URLSearchParams(fd).toString();
+  var btn = document.getElementById('createTaskBtn');
+  if (btn) btn.disabled = true;
+  apiFetch('/task/create', body)
+    .then(function() { pollData(); })
+    .catch(function(err) { alert('创建失败: ' + err); })
+    .finally(function() { if (btn) btn.disabled = false; });
+});
+
+var sab = document.getElementById('selectAllBtn');
+if (sab) sab.addEventListener('click', function() {
+  var s = document.getElementById('clientSelectBox');
+  if (!s) return;
+  for(var i=0; i<s.options.length; i++){ s.options[i].selected = true; }
+});
+
+document.querySelectorAll('.flash-test-btn').forEach(function(b) {
+  b.addEventListener('click', function() {
+    var box = document.getElementById('clientSelectBox');
+    var selected = false;
+    for(var i=0; i<box.options.length; i++) { if(box.options[i].selected) selected = true; }
+    if(!selected) { alert('请先在上方选择客户端'); return; }
+    document.querySelector('select[name="mode"]').value = b.dataset.mode;
+    document.querySelector('input[name="up_mbps"]').value = '10';
+    document.querySelector('input[name="down_mbps"]').value = '10';
+    document.querySelector('input[name="duration_val"]').value = '1';
+    document.querySelector('select[name="duration_unit"]').value = 'min';
+    taskForm.dispatchEvent(new Event('submit'));
+  });
 });
 
 })();
