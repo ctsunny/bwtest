@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-var Version = "v0.4.18"
+var Version = "v0.4.19"
 
 type Config struct {
 	ServerURL   string `json:"server_url"`
@@ -625,10 +625,12 @@ func selfUpgrade(version string) {
 		return
 	}
 
-	dlURL := fmt.Sprintf(
-		"https://github.com/ctsunny/bwtest/releases/download/%s/bwagent-linux-%s",
-		version, arch,
-	)
+	var dlURL string
+	if version == "latest" {
+		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/latest/download/bwagent-linux-%s", arch)
+	} else {
+		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/download/%s/bwagent-linux-%s", version, arch)
+	}
 	log.Printf("[upgrade] 开始下载 %s", dlURL)
 
 	dlClient := &http.Client{Timeout: 5 * time.Minute}

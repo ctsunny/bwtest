@@ -26,7 +26,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var Version = "v0.4.18"
+var Version = "v0.4.19"
 
 type Config struct {
 	PanelAddr  string
@@ -1824,9 +1824,10 @@ bindClick('upgradeAllBtn', function() {
   btn.disabled = true;
   var oldText = btn.textContent;
   btn.textContent = "推送中...";
-  apiFetch('/client/upgrade', 'client_id=all&version=latest')
+  var targetVer = VERSION || '';
+  apiFetch('/client/upgrade', 'client_id=all&version=' + encodeURIComponent(targetVer))
     .then(function(d) {
-      alert('✅ 已向所有客户端推送批量更新指令（目标版本: ' + (d.version || 'latest') + '）。\n客户端将在收到下一次心跳时完成自动更新。');
+      alert('✅ 已向所有客户端推送批量更新指令（目标版本: ' + (d.version || targetVer) + '）。\n客户端将在收到下一次心跳时完成自动更新。');
     })
     .catch(function(err) {
       alert('推送批量更新失败: ' + err);
