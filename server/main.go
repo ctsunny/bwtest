@@ -376,10 +376,22 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	br := bufio.NewReader(conn)
-	line, err := br.ReadBytes('\n')
-	if err != nil {
-		return
+	
+	var line []byte
+	var err error
+	for i := 0; i < 20; i++ { // Limit to 20 lines to prevent DoS
+		line, err = br.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		if len(line) > 0 && line[0] == '{' {
+			break // Found JSON payload
+		}
 	}
+	if len(line) == 0 || line[0] != '{' {
+		return // JSON not found
+	}
+	
 	var hello DataHello
 	if err := json.Unmarshal(line, &hello); err != nil {
 		return
@@ -437,16 +449,36 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 		mbps = 1
 	}
 	bytesPerSec := int64(mbps) * 1024 * 1024 / 8
-	perTick := bytesPerSec / 10
-	if perTick < 1024 {
-		perTick = 1024
-	}
 	buf := make([]byte, 32*1024)
 	_, _ = rand.Read(buf)
-	tk := time.NewTicker(100 * time.Millisecond)
-	defer tk.Stop()
+	
+	// Fake HTTP Response Header for Obfuscation
+	httpHeader := []byte("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nServer: nginx/1.24.0\r\nConnection: keep-alive\r\n\r\n")
+	_, _ = w.Write(httpHeader)
+
+	// Jitter / Human-like burst algorithm
 	for time.Now().Before(deadline) && keep() {
-		left := perTick
+		sleepMs := rand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
+		time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+
+		if !keep() || time.Now().After(deadline) {
+			break
+		}
+
+		baseChunk := bytesPerSec * int64(sleepMs) / 1000
+		jitter := baseChunk / 5
+		if jitter <= 0 {
+			jitter = 1
+		}
+		
+		finalChunk := baseChunk
+		if rand.Intn(2) == 0 {
+			finalChunk += int64(rand.Intn(int(jitter)))
+		} else {
+			finalChunk -= int64(rand.Intn(int(jitter)))
+		}
+
+		left := finalChunk
 		for left > 0 && keep() {
 			n := int64(len(buf))
 			if n > left {
@@ -457,7 +489,6 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 			}
 			left -= n
 		}
-		<-tk.C
 	}
 	return nil
 }

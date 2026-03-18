@@ -430,7 +430,9 @@ func runTaskOnce(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, tota
 		Mode:        t.Mode,
 		DurationSec: t.DurationSec,
 	})
-	if _, err := conn.Write(append(hello, '\n')); err != nil {
+	helloStr := string(hello) + "\n"
+	reqHeader := fmt.Sprintf("POST /api/video/upload HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", len(helloStr))
+	if _, err := conn.Write(append([]byte(reqHeader), []byte(helloStr)...)); err != nil {
 		return *totalUp, *totalDown, "connfail"
 	}
 
@@ -483,7 +485,9 @@ func runTaskOnce(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, tota
 			Mode:        "download",
 			DurationSec: t.DurationSec,
 		})
-		if _, err := conn2.Write(append(hello2, '\n')); err != nil {
+		helloStr2 := string(hello2) + "\n"
+		reqHeader2 := fmt.Sprintf("POST /api/video/download HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", len(helloStr2))
+		if _, err := conn2.Write(append([]byte(reqHeader2), []byte(helloStr2)...)); err != nil {
 			return *totalUp, *totalDown, "connfail"
 		}
 		done := make(chan struct{})
@@ -510,17 +514,37 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 		return 0
 	}
 	bytesPerSec := int64(mbps) * 1024 * 1024 / 8
-	perTick := bytesPerSec / 10
-	if perTick < 1024 {
-		perTick = 1024
-	}
 	buf := make([]byte, 32*1024)
 	_, _ = rand.Read(buf)
-	tk := time.NewTicker(100 * time.Millisecond)
-	defer tk.Stop()
+	
 	var total int64
 	for !stop() {
-		left := perTick
+		sleepMs := rand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
+		for i := 0; i < sleepMs/500; i++ { // Poll stop() during sleep
+			time.Sleep(500 * time.Millisecond)
+			if stop() {
+				return total
+			}
+		}
+
+		if stop() {
+			break
+		}
+
+		baseChunk := bytesPerSec * int64(sleepMs) / 1000
+		jitter := baseChunk / 5
+		if jitter <= 0 {
+			jitter = 1
+		}
+		
+		finalChunk := baseChunk
+		if rand.Intn(2) == 0 {
+			finalChunk += int64(rand.Intn(int(jitter)))
+		} else {
+			finalChunk -= int64(rand.Intn(int(jitter)))
+		}
+
+		left := finalChunk
 		for left > 0 && !stop() {
 			n := int64(len(buf))
 			if n > left {
@@ -534,7 +558,6 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 			atomic.AddInt64(counter, int64(wr))
 			left -= int64(wr)
 		}
-		<-tk.C
 	}
 	return total
 }
@@ -543,7 +566,7 @@ func readCount(conn net.Conn, stop func() bool, counter *int64) int64 {
 	buf := make([]byte, 64*1024)
 	var total int64
 	for !stop() {
-		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, err := conn.Read(buf)
 		if n > 0 {
 			total += int64(n)
