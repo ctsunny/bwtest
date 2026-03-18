@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-var Version = "v0.4.19"
+var Version = "v0.4.20"
 
 type Config struct {
 	ServerURL   string `json:"server_url"`
@@ -520,8 +520,13 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 	
 	var total int64
 	for !stop() {
-		sleepMs := mrand.Intn(200) + 50 // Sleep 50ms ~ 250ms
-		time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+		sleepMs := mrand.Intn(1000) + 500 // Sleep 500ms ~ 1.5s
+		for i := 0; i < sleepMs/200; i++ { // Poll stop() during sleep
+			time.Sleep(200 * time.Millisecond)
+			if stop() {
+				return total
+			}
+		}
 		if stop() {
 			break
 		}
