@@ -26,7 +26,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var Version = "v0.4.17"
+var Version = "v0.4.18"
 
 type Config struct {
 	PanelAddr  string
@@ -1132,6 +1132,7 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
       <span id="liveStatus" class="note">数据自动同步中...</span>
     </div>
     <div style="display:flex; gap:8px">
+      <button type="button" class="warn" id="upgradeAllBtn">🚀 一键升级所有</button>
       <button type="button" class="info" onclick="document.getElementById('genModal').classList.add('open')">➕ 接入新客户端</button>
       <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ 设置</a>
       <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器</a>
@@ -1817,6 +1818,25 @@ bindClick('confirmPushUpgradeBtn', function() {
     .finally(function() { confirmBtn.disabled = false; });
 });
 
+bindClick('upgradeAllBtn', function() {
+  if (!confirm("确定要向所有客户端推送升至最新版的指令吗？\n所有客户端将在 20 秒内自动下载并重启服务。")) return;
+  var btn = document.getElementById('upgradeAllBtn');
+  btn.disabled = true;
+  var oldText = btn.textContent;
+  btn.textContent = "推送中...";
+  apiFetch('/client/upgrade', 'client_id=all&version=latest')
+    .then(function(d) {
+      alert('✅ 已向所有客户端推送批量更新指令（目标版本: ' + (d.version || 'latest') + '）。\n客户端将在收到下一次心跳时完成自动更新。');
+    })
+    .catch(function(err) {
+      alert('推送批量更新失败: ' + err);
+    })
+    .finally(function() { 
+      btn.disabled = false; 
+      btn.textContent = oldText;
+    });
+});
+
 delegate('clientBody', 'approve-btn', function(target) {
   apiFetch('/approve', 'client_id=' + encodeURIComponent(target.dataset.id))
     .then(function() { pollData(); })
@@ -2302,7 +2322,11 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 		if version == "" {
 			version = getenv("BWPANEL_VERSION", Version)
 		}
-		_, _ = db.Exec(`UPDATE clients SET upgrade_to=? WHERE id=?`, version, clientID)
+		if clientID == "all" {
+			_, _ = db.Exec(`UPDATE clients SET upgrade_to=?`, version)
+		} else {
+			_, _ = db.Exec(`UPDATE clients SET upgrade_to=? WHERE id=?`, version, clientID)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": version})
 	}
