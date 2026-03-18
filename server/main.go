@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -458,7 +459,7 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 
 	// Jitter / Human-like burst algorithm
 	for time.Now().Before(deadline) && keep() {
-		sleepMs := rand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
+		sleepMs := mrand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
 		time.Sleep(time.Duration(sleepMs) * time.Millisecond)
 
 		if !keep() || time.Now().After(deadline) {
@@ -472,10 +473,10 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 		}
 		
 		finalChunk := baseChunk
-		if rand.Intn(2) == 0 {
-			finalChunk += int64(rand.Intn(int(jitter)))
+		if mrand.Intn(2) == 0 {
+			finalChunk += int64(mrand.Intn(int(jitter)))
 		} else {
-			finalChunk -= int64(rand.Intn(int(jitter)))
+			finalChunk -= int64(mrand.Intn(int(jitter)))
 		}
 
 		left := finalChunk

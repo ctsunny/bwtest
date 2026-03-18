@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -519,7 +520,7 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 	
 	var total int64
 	for !stop() {
-		sleepMs := rand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
+		sleepMs := mrand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
 		for i := 0; i < sleepMs/500; i++ { // Poll stop() during sleep
 			time.Sleep(500 * time.Millisecond)
 			if stop() {
@@ -538,10 +539,10 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 		}
 		
 		finalChunk := baseChunk
-		if rand.Intn(2) == 0 {
-			finalChunk += int64(rand.Intn(int(jitter)))
+		if mrand.Intn(2) == 0 {
+			finalChunk += int64(mrand.Intn(int(jitter)))
 		} else {
-			finalChunk -= int64(rand.Intn(int(jitter)))
+			finalChunk -= int64(mrand.Intn(int(jitter)))
 		}
 
 		left := finalChunk
