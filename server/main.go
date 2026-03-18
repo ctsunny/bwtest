@@ -2208,6 +2208,12 @@ func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) 
 			}
 		}
 		broker.Publish("tasks")
+		// 支持 AJAX 调用（Accept: application/json）和传统 form 跳转
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
 		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
 }
