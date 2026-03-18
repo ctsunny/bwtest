@@ -25,7 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var Version = "v0.4.11"
+var Version = "v0.4.12"
 
 type Config struct {
 	PanelAddr  string
@@ -65,6 +65,7 @@ type Task struct {
 	FinishedAt    string
 	UploadBytes   int64
 	DownloadBytes int64
+	Logs          string
 }
 
 type RegisterReq struct {
@@ -89,6 +90,7 @@ type ResultReq struct {
 	Status        string `json:"status"`
 	UploadBytes   int64  `json:"upload_bytes"`
 	DownloadBytes int64  `json:"download_bytes"`
+	Logs          string `json:"logs"`
 }
 
 type ProgressReq struct {
@@ -97,6 +99,7 @@ type ProgressReq struct {
 	TaskID        string `json:"task_id"`
 	UploadBytes   int64  `json:"upload_bytes"`
 	DownloadBytes int64  `json:"download_bytes"`
+	Logs          string `json:"logs"`
 }
 
 type AssignResp struct {
@@ -252,6 +255,7 @@ func main() {
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
+	mux.Handle(p+"/task/logs", basicAuth(cfg, http.HandlerFunc(handleGetTaskLogs(db))))
 	mux.Handle(p+"/task/clear-history", basicAuth(cfg, http.HandlerFunc(handleClearHistory(p, db, broker))))
 	mux.Handle(p+"/gen/install-cmd", basicAuth(cfg, http.HandlerFunc(handleGenInstallCmd(p, cfg))))
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
@@ -276,7 +280,7 @@ func watchStuckTasks(db *sql.DB, broker *Broker) {
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
 	for range tk.C {
-		threshold := time.Now().Add(-90 * time.Second).Format(time.RFC3339)
+		threshold := time.Now().Add(-300 * time.Second).Format(time.RFC3339)
 		rows, err := db.Query(`
 			SELECT t.id, t.client_id FROM tasks t
 			JOIN clients c ON c.id = t.client_id
@@ -340,8 +344,10 @@ func mustInitDB(path string) *sql.DB {
 			started_at TEXT NOT NULL DEFAULT '',
 			finished_at TEXT NOT NULL DEFAULT '',
 			upload_bytes INTEGER NOT NULL DEFAULT 0,
-			download_bytes INTEGER NOT NULL DEFAULT 0
+			download_bytes INTEGER NOT NULL DEFAULT 0,
+			logs TEXT NOT NULL DEFAULT ''
 		);`,
+		`ALTER TABLE tasks ADD COLUMN logs TEXT NOT NULL DEFAULT '';`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -623,8 +629,8 @@ func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		} else if status == "stopping" {
 			finalStatus = "stopped"
 		}
-		_, _ = db.Exec(`UPDATE tasks SET status=?, finished_at=?, upload_bytes=?, download_bytes=? WHERE id=?`,
-			finalStatus, time.Now().Format(time.RFC3339), req.UploadBytes, req.DownloadBytes, req.TaskID)
+		_, _ = db.Exec(`UPDATE tasks SET status=?, finished_at=?, upload_bytes=?, download_bytes=?, logs=? WHERE id=?`,
+			finalStatus, time.Now().Format(time.RFC3339), req.UploadBytes, req.DownloadBytes, req.Logs, req.TaskID)
 		_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, req.ClientID)
 		broker.Publish("tasks")
 		clientName := req.ClientID
@@ -685,8 +691,8 @@ func handleTaskProgress(db *sql.DB) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
 			return
 		}
-		_, _ = db.Exec(`UPDATE tasks SET upload_bytes=?, download_bytes=? WHERE id=?`,
-			req.UploadBytes, req.DownloadBytes, req.TaskID)
+		_, _ = db.Exec(`UPDATE tasks SET upload_bytes=?, download_bytes=?, logs=? WHERE id=?`,
+			req.UploadBytes, req.DownloadBytes, req.Logs, req.TaskID)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
@@ -1120,6 +1126,17 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
   </div>
 </div>
 
+<!-- 任务日志弹窗 -->
+<div id="logsModal" class="modal-overlay">
+  <div class="modal-inner" style="width:min(900px, 95vw)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <h2 style="margin:0">📄 任务执行日志 (最近200条)</h2>
+      <button type="button" class="sec" onclick="document.getElementById('logsModal').classList.remove('open')">关闭</button>
+    </div>
+    <div style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;font-family:monospace;font-size:12px;height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all" id="logsContent">正在加载...</div>
+  </div>
+</div>
+
 <!-- 升级命令弹窗 -->
 <div id="upgradeModal" class="modal-overlay">
   <div class="modal-inner">
@@ -1318,9 +1335,12 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
       <td data-label="已拉" class="down-col">-</td>
       <td data-label="日期">{{.StartedAt | shortTime}}</td>
       <td data-label="操作">
-        {{if eq .Status "running"}}<button type="button" class="danger stop-btn" data-task-id="{{.ID}}">🛑 停止</button>
-        {{else if eq .Status "pending"}}<button type="button" class="warn stop-btn" data-task-id="{{.ID}}">✖ 取消</button>
-        {{else}}<button type="button" class="danger force-del-btn" data-task-id="{{.ID}}">🗑 强制删除</button>{{end}}
+        <div style="display:flex;gap:4px">
+          <button type="button" class="info view-logs-btn" data-task-id="{{.ID}}">📄 日志</button>
+          {{if eq .Status "running"}}<button type="button" class="danger stop-btn" data-task-id="{{.ID}}">🛑 停止</button>
+          {{else if eq .Status "pending"}}<button type="button" class="warn stop-btn" data-task-id="{{.ID}}">✖ 取消</button>
+          {{else}}<button type="button" class="danger force-del-btn" data-task-id="{{.ID}}">🗑 强制删除</button>{{end}}
+        </div>
       </td>
     </tr>
     {{end}}
@@ -1355,7 +1375,8 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
       <td data-label="开始">{{.StartedAt | shortTime}}</td>
       <td data-label="结束">{{.FinishedAt | shortTime}}</td>
       <td data-label="操作">
-        <div style="display:flex;gap:4px">
+        <div style="display:flex;gap:4px;flex-wrap:wrap">
+          <button type="button" class="info view-logs-btn" data-task-id="{{.ID}}">📄 日志</button>
           <button type="button" class="danger del-task-btn" data-task-id="{{.ID}}">🗑 删除</button>
           <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}">🔄 克隆</button>
         </div>
@@ -1717,15 +1738,32 @@ function taskAction(path, taskId, msg) {
     .catch(function(err) { alert('操作失败: ' + err); });
 }
 
+delegate('runningTaskBody', 'view-logs-btn', viewLogs);
+delegate('historyTaskBody', 'view-logs-btn', viewLogs);
+
 delegate('runningTaskBody', 'stop-btn', function(target) {
-  taskAction('/task/stop', target.dataset.taskId, '确认停止此任务？');
+    taskAction('/task/stop', target.dataset.taskId, '确认停止此任务？');
 });
 delegate('runningTaskBody', 'force-del-btn', function(target) {
-  taskAction('/task/delete', target.dataset.taskId, '确认强制删除此任务？');
+    taskAction('/task/delete', target.dataset.taskId, '确认强制删除此任务？');
 });
 delegate('historyTaskBody', 'del-task-btn', function(target) {
-  taskAction('/task/delete', target.dataset.taskId, '确认删除此记录？');
+    taskAction('/task/delete', target.dataset.taskId, '确认删除此记录？');
 });
+
+function viewLogs(target) {
+    var tid = target.dataset.taskId;
+    var content = document.getElementById('logsContent');
+    content.textContent = '正在从服务器加载日志...';
+    document.getElementById('logsModal').classList.add('open');
+    fetch(PANEL_PATH + '/task/logs?task_id=' + tid, { credentials: 'include' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            content.textContent = d.logs || '（该任务暂无可用日志，可能任务尚在队列中或客户端尚未上报）';
+            content.scrollTop = content.scrollHeight;
+        })
+        .catch(function(err) { content.textContent = '加载失败: ' + err; });
+}
 
 bindClick('closePushUpgradeBtn', function() {
   document.getElementById('pushUpgradeModal').classList.remove('open');
@@ -1824,6 +1862,7 @@ closeModalOnBackdrop('editModal');
 closeModalOnBackdrop('upgradeModal');
 closeModalOnBackdrop('pushUpgradeModal');
 closeModalOnBackdrop('genModal');
+closeModalOnBackdrop('logsModal');
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
   var opened = document.querySelectorAll('.modal-overlay.open');
@@ -2022,6 +2061,16 @@ func handleDeleteTask(panelPath string, db *sql.DB, broker *Broker) http.Handler
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+}
+
+func handleGetTaskLogs(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		taskID := r.URL.Query().Get("task_id")
+		var logs string
+		_ = db.QueryRow(`SELECT logs FROM tasks WHERE id=?`, taskID).Scan(&logs)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "logs": logs})
 	}
 }
 
@@ -2257,7 +2306,7 @@ func mustClients(db *sql.DB) []Client {
 }
 
 func mustTasks(db *sql.DB) []Task {
-	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at,started_at,finished_at,upload_bytes,download_bytes FROM tasks`)
+	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at,started_at,finished_at,upload_bytes,download_bytes,logs FROM tasks`)
 	if err != nil {
 		return nil
 	}
@@ -2265,7 +2314,7 @@ func mustTasks(db *sql.DB) []Task {
 	var out []Task
 	for rows.Next() {
 		var t Task
-		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.UploadBytes, &t.DownloadBytes)
+		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs)
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })

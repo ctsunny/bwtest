@@ -13,11 +13,12 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-var Version = "v0.4.11"
+var Version = "v0.4.12"
 
 type Config struct {
 	ServerURL   string `json:"server_url"`
@@ -58,6 +59,7 @@ type ResultReq struct {
 	Status        string `json:"status"`
 	UploadBytes   int64  `json:"upload_bytes"`
 	DownloadBytes int64  `json:"download_bytes"`
+	Logs          string `json:"logs"`
 }
 
 type ProgressReq struct {
@@ -66,6 +68,7 @@ type ProgressReq struct {
 	TaskID        string `json:"task_id"`
 	UploadBytes   int64  `json:"upload_bytes"`
 	DownloadBytes int64  `json:"download_bytes"`
+	Logs          string `json:"logs"`
 }
 
 type ControlResp struct {
@@ -83,6 +86,41 @@ type DataHello struct {
 var busy int32
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
+type logBuffer struct {
+	lines []string
+	max   int
+	mu    sync.Mutex
+}
+
+func (lb *logBuffer) Write(p []byte) (n int, err error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	s := string(p)
+	lb.lines = append(lb.lines, s)
+	if len(lb.lines) > lb.max {
+		lb.lines = lb.lines[1:]
+	}
+	return len(p), nil
+}
+
+func (lb *logBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	var buf bytes.Buffer
+	for _, l := range lb.lines {
+		buf.WriteString(l)
+	}
+	return buf.String()
+}
+
+func (lb *logBuffer) Clear() {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	lb.lines = nil
+}
+
+var logBuf = &logBuffer{max: 200}
+
 func main() {
 	cfgPath := "/etc/bwagent/config.json"
 	if len(os.Args) > 1 {
@@ -94,7 +132,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("bwagent %s starting...", getenv("BWAGENT_VERSION", "unknown"))
+	log.SetOutput(io.MultiWriter(os.Stdout, logBuf))
+	log.Printf("bwagent %s starting...", Version)
 
 	// register with retry
 	for {
@@ -215,6 +254,7 @@ func pollLoop(cfg *Config) {
 		atomic.StoreInt32(&busy, 1)
 		go func(t *Task) {
 			defer atomic.StoreInt32(&busy, 0)
+			logBuf.Clear() // 任务开始前清空日志，确保只上报当前任务运行的日志
 			up, down, status := runTaskWithRetry(cfg, t)
 			_ = postJSON(cfg.ServerURL+"/api/task/result", ResultReq{
 				ClientID:      cfg.ClientID,
@@ -223,6 +263,7 @@ func pollLoop(cfg *Config) {
 				Status:        status,
 				UploadBytes:   up,
 				DownloadBytes: down,
+				Logs:          logBuf.String(),
 			}, nil)
 		}(task)
 	}
@@ -285,6 +326,7 @@ func progressLoop(cfg *Config, taskID string, upBytes, downBytes *int64, stop <-
 				TaskID:        taskID,
 				UploadBytes:   atomic.LoadInt64(upBytes),
 				DownloadBytes: atomic.LoadInt64(downBytes),
+				Logs:          logBuf.String(),
 			}, nil)
 		}
 	}
@@ -300,19 +342,27 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 	go func() {
 		tk := time.NewTicker(2 * time.Second)
 		defer tk.Stop()
+		var failCount int
 		for range tk.C {
 			if time.Now().After(deadline) {
 				return
 			}
 			status, err := taskControl(cfg, t.ID)
 			if err != nil {
-				// 401 / 网络错误：任务已不存在或服务端重启，立即停止
-				log.Printf("[task %s] control check error: %v, stopping", t.ID, err)
-				atomic.StoreInt32(&stopFlag, 1)
-				return
+				failCount++
+				// 只有连续失败3次（约6-10秒）才认为任务被外部终止，增加对 transient API 错误的鲁棒性
+				if failCount >= 3 {
+					log.Printf("[task %s] control check error (consecutive %d): %v, stopping", t.ID, failCount, err)
+					atomic.StoreInt32(&stopFlag, 1)
+					return
+				}
+				log.Printf("[task %s] control check transient error: %v, retrying...", t.ID, err)
+				continue
 			}
+			failCount = 0
 			// stopping: 服务端请求停止; stopped/done: 服务端已直接终止（如重启重置、看门狗超时）
 			if status == "stopping" || status == "stopped" || status == "done" {
+				log.Printf("[task %s] server requested %s", t.ID, status)
 				atomic.StoreInt32(&stopFlag, 1)
 				return
 			}
