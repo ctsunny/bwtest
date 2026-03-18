@@ -6,7 +6,7 @@ APP_USER="bwtest"
 APP_GROUP="bwtest"
 BIN_NAME="bwagent"
 INSTALL_DIR="/opt/bwtest"
-BIN_PATH="/usr/local/bin/${BIN_NAME}"
+BIN_PATH="${INSTALL_DIR}/${BIN_NAME}"
 CONFIG_DIR="/etc/bwagent"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 ENV_FILE="/etc/default/${BIN_NAME}"
@@ -105,7 +105,7 @@ download_binary() {
   if [[ "${http_code}" == "200" ]] && is_elf "${tmp}"; then
     log "Release 下载成功"
     systemctl stop "${BIN_NAME}" 2>/dev/null || true
-    install -m 0755 "${tmp}" "${BIN_PATH}"
+    install -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${tmp}" "${BIN_PATH}"
     rm -f "${tmp}"
   else
     rm -f "${tmp}"
@@ -136,7 +136,7 @@ build_from_source() {
     -o /tmp/${BIN_NAME}_new ./client/
 
   systemctl stop "${BIN_NAME}" 2>/dev/null || true
-  install -m 0755 /tmp/${BIN_NAME}_new "${BIN_PATH}"
+  install -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" /tmp/${BIN_NAME}_new "${BIN_PATH}"
   rm -f /tmp/${BIN_NAME}_new
   log "编译完成"
 }

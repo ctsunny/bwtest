@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 )
++
++var Version = "v0.4.8"
 
 type Config struct {
 	ServerURL   string `json:"server_url"`
@@ -142,12 +144,16 @@ func loadOrCreateConfig(path string) (*Config, error) {
 }
 
 func register(cfg *Config) error {
+	ver := Version
+	if ver == "" {
+		ver = getenv("BWAGENT_VERSION", "unknown")
+	}
 	return postJSON(cfg.ServerURL+"/api/register", RegisterReq{
 		ClientID:    cfg.ClientID,
 		ClientToken: cfg.ClientToken,
 		Name:        cfg.Name,
 		InitToken:   cfg.InitToken,
-		Version:     getenv("BWAGENT_VERSION", "unknown"),
+		Version:     ver,
 	}, nil)
 }
 
@@ -160,11 +166,14 @@ func heartbeatLoop(cfg *Config) {
 			OK        bool   `json:"ok"`
 			UpgradeTo string `json:"upgrade_to"`
 		}
-		
+		ver := Version
+		if ver == "" {
+			ver = getenv("BWAGENT_VERSION", "unknown")
+		}
 		req := HeartbeatReq{
 			ClientID:    cfg.ClientID,
 			ClientToken: cfg.ClientToken,
-			Version:     getenv("BWAGENT_VERSION", "unknown"),
+			Version:     ver,
 			Latency:     lastLatency,
 		}
 
@@ -177,9 +186,12 @@ func heartbeatLoop(cfg *Config) {
 		}
 
 		if resp.UpgradeTo != "" {
-			currentVer := getenv("BWAGENT_VERSION", "")
-			if resp.UpgradeTo != currentVer {
-				log.Printf("[upgrade] 服务端要求升级到 %s，开始自动升级...", resp.UpgradeTo)
+			ver := Version
+			if ver == "" {
+				ver = getenv("BWAGENT_VERSION", "")
+			}
+			if resp.UpgradeTo != ver {
+				log.Printf("[upgrade] 服务端要求升级到 %s，当前版本 %s，开始自动升级...", resp.UpgradeTo, ver)
 				go selfUpgrade(resp.UpgradeTo)
 			}
 		}
@@ -563,8 +575,15 @@ func selfUpgrade(version string) {
 		return
 	}
 
-	// 写入临时文件
-	tmpPath := "/tmp/bwagent-upgrade-" + version
+	// 获取当前二进制路径
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("[upgrade] 无法获取当前二进制路径: %v", err)
+		return
+	}
+
+	// 写入临时文件 (在同一目录下，以防跨文件系统导致 rename 失败)
+	tmpPath := exePath + ".new"
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		log.Printf("[upgrade] 创建临时文件失败: %v", err)
@@ -579,15 +598,7 @@ func selfUpgrade(version string) {
 	}
 	log.Printf("[upgrade] 下载完成，文件大小 %d 字节", n)
 
-	// 获取当前二进制路径
-	exePath, err := os.Executable()
-	if err != nil {
-		log.Printf("[upgrade] 无法获取当前二进制路径: %v", err)
-		_ = os.Remove(tmpPath)
-		return
-	}
-
-	// 原子替换：先备份，再 rename（Linux 上 rename 是原子操作）
+	// 原子替换：先备份，再 rename
 	backupPath := exePath + ".bak"
 	_ = os.Remove(backupPath)
 	if err := os.Rename(exePath, backupPath); err != nil {

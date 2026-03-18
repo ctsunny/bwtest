@@ -25,7 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const AppVersion = "v0.4.0"
+var Version = "v0.4.8"
 
 type Config struct {
 	PanelAddr  string
@@ -227,7 +227,7 @@ func main() {
 	db := mustInitDB(cfg.DBPath)
 	broker := NewBroker()
 
-	log.Printf("bwtest server %s starting...", AppVersion)
+	log.Printf("bwtest server %s starting...", Version)
 	log.Printf("panel=%s%s data=%s db=%s bark=%v",
 		cfg.PanelAddr, cfg.PanelPath, cfg.DataAddr, cfg.DBPath, cfg.BarkURL != "")
 
@@ -944,7 +944,7 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		version := getenv("BWPANEL_VERSION", AppVersion)
+		version := getenv("BWPANEL_VERSION", Version)
 		genName := strings.TrimSpace(r.URL.Query().Get("gen_name"))
 		genRemark := strings.TrimSpace(r.URL.Query().Get("gen_remark"))
 		genVersion := strings.TrimSpace(r.URL.Query().Get("gen_version"))
@@ -2034,7 +2034,7 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 		clientID := r.Form.Get("client_id")
 		version  := strings.TrimSpace(r.Form.Get("version"))
 		if version == "" {
-			version = getenv("BWPANEL_VERSION", AppVersion)
+			version = getenv("BWPANEL_VERSION", Version)
 		}
 		_, _ = db.Exec(`UPDATE clients SET upgrade_to=? WHERE id=?`, version, clientID)
 		w.Header().Set("Content-Type", "application/json")
