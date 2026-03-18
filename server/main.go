@@ -252,6 +252,7 @@ func main() {
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
+	mux.Handle(p+"/task/clear-history", basicAuth(cfg, http.HandlerFunc(handleClearHistory(p, db, broker))))
 	mux.Handle(p+"/gen/install-cmd", basicAuth(cfg, http.HandlerFunc(handleGenInstallCmd(p, cfg))))
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
@@ -1167,12 +1168,18 @@ textarea{resize:vertical;min-height:60px}
   <form method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
-        <label class="note">选择客户端</label>
-        <select name="client_id" required style="margin-top:4px">
+        <label class="note" style="display:flex; justify-content:space-between"><span>选择客户端（可多选）</span> <span style="font-size:11px;color:var(--primary);cursor:pointer" onclick="selectAll()">全选</span></label>
+        <select id="clientSelectBox" name="client_id" multiple required style="margin-top:4px; height:80px">
           {{range .ApprovedClients}}
           <option value="{{.ID}}" {{if eq .ID $.DefaultClientID}}selected{{end}}>{{.Name}}</option>
           {{end}}
         </select>
+        <script>
+          function selectAll() {
+            var s = document.getElementById('clientSelectBox');
+            for(var i=0; i<s.options.length; i++){ s.options[i].selected = true; }
+          }
+        </script>
       </div>
       <div>
         <label class="note">模式</label>
@@ -1208,7 +1215,7 @@ textarea{resize:vertical;min-height:60px}
       </div>
     </div>
   </form>
-  <div class="tip">上传/下载速度单位为 Mbps；时长默认选"分"，1 分 = 60 秒。</div>
+  <div class="tip">提示：按住 Ctrl 或 Shift 点击客户端名称可批量多选下发任务；上传/下载速度单位为 Mbps。</div>
 </div>
 
 
@@ -1218,7 +1225,7 @@ textarea{resize:vertical;min-height:60px}
   <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
   <div class="tbl">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>网络延迟</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>任务进度</th><th>网络延迟</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>操作</th></tr></thead>
     <tbody id="runningTaskBody">
     {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
@@ -1226,8 +1233,9 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.Mode}}</td>
       <td>{{.UpMbps}}</td>
       <td>{{.DownMbps}}</td>
-      <td>{{.DurationSec}} 秒</td>
+      <td>{{.DurationSec | fmtDurationHTML}}</td>
       <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td class="progress-col">{{buildProgressHTML .}}</td>
       <td class="rtt-col" data-client-id="{{.ClientID}}">-</td>
       <td class="up-col">-</td>
       <td class="down-col">-</td>
@@ -1243,7 +1251,12 @@ textarea{resize:vertical;min-height:60px}
 	          <input type="hidden" name="task_id" value="{{.ID}}">
 	          <button type="submit" class="warn stop-btn">取消</button>
 	        </form>
-	        {{else}}<span class="note">-</span>{{end}}
+	        {{else}}
+	        <form method="post" action="{{$.PanelPath}}/task/delete" style="margin:0" onsubmit="return confirm('强制删除此卡住的任务？')">
+	          <input type="hidden" name="task_id" value="{{.ID}}">
+	          <button type="submit" class="danger">删除</button>
+	        </form>
+	        {{end}}
 	      </td>
     </tr>
     {{end}}
@@ -1255,7 +1268,12 @@ textarea{resize:vertical;min-height:60px}
 
 <!-- 历史任务 -->
 <div class="card" id="historyCard" style="display:none">
-  <h2>📋 历史任务</h2>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px">
+    <h2 style="margin:0">📋 历史任务</h2>
+    <form method="post" action="{{.PanelPath}}/task/clear-history" onsubmit="return confirm('确认清空所有历史任务？')">
+      <button type="submit" class="sec danger">清空历史</button>
+    </form>
+  </div>
   <div class="tbl">
   <table>
     <thead><tr><th>客户端</th><th>模式</th><th>上传 Mbps</th><th>下载 Mbps</th><th>时长</th><th>状态</th><th>已上传</th><th>已下载</th><th>开始时间</th><th>结束时间</th><th>操作</th></tr></thead>
@@ -1266,7 +1284,7 @@ textarea{resize:vertical;min-height:60px}
       <td>{{.Mode}}</td>
       <td>{{.UpMbps}}</td>
       <td>{{.DownMbps}}</td>
-      <td>{{.DurationSec}} 秒</td>
+      <td>{{.DurationSec | fmtDurationHTML}}</td>
       <td><span class="badge {{.Status}}">{{.Status}}</span></td>
       <td>{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
       <td>{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
@@ -1372,6 +1390,26 @@ function fmtShortTime(s) {
   return s;
 }
 
+function fmtDuration(secs) {
+  if (secs < 60) return secs + ' 秒';
+  if (secs < 3600) return Math.floor(secs / 60) + ' 分钟';
+  if (secs < 86400) return (secs / 3600).toFixed(1) + ' 小时';
+  return (secs / 86400).toFixed(1) + ' 天';
+}
+
+function buildProgress(t) {
+  if (t.status === 'pending') return '<span class="note">0%</span>';
+  if (t.status !== 'running' && t.status !== 'stopping') return '-';
+  if (!t.started_at) return '-';
+  var st = new Date(t.started_at).getTime();
+  if (isNaN(st)) return '-';
+  var elapsed = (Date.now() - st) / 1000;
+  if (elapsed < 0) return '0%';
+  var pct = (elapsed / t.duration_sec) * 100;
+  if (pct > 100) pct = 100;
+  return pct.toFixed(1) + '%';
+}
+
 // 动态行：停止按钮输出为 form，保证无 JS 也可提交
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
@@ -1383,11 +1421,14 @@ function buildRunningRow(t) {
 	  ? '<form method="post" action="' + PANEL_PATH + '/task/stop" style="margin:0" onsubmit="return confirm(\'确认取消此待执行任务？\')">'
 	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
 	    + '<button type="submit" class="warn stop-btn">取消</button></form>'
-	  : '<span class="note">-</span>';
+	  : '<form method="post" action="' + PANEL_PATH + '/task/delete" style="margin:0" onsubmit="return confirm(\'强制删除此卡住的任务？\')">'
+	    + '<input type="hidden" name="task_id" value="' + t.id + '">'
+	    + '<button type="submit" class="danger">删除</button></form>';
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
-    + '<td>' + t.duration_sec + ' 秒</td>'
+    + '<td>' + fmtDuration(t.duration_sec) + '</td>'
     + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
+    + '<td class="progress-col">' + buildProgress(t) + '</td>'
     + '<td class="rtt-col" data-client-id="' + t.client_id + '">-</td>'
     + '<td class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
     + '<td class="down-col">' + fmtGB(t.download_bytes) + '</td>'
@@ -1401,7 +1442,7 @@ function buildHistoryRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   return '<tr data-task-id="' + t.id + '">'
     + '<td>' + name + '</td><td>' + t.mode + '</td><td>' + t.up_mbps + '</td><td>' + t.down_mbps + '</td>'
-    + '<td>' + t.duration_sec + ' 秒</td>'
+    + '<td>' + fmtDuration(t.duration_sec) + '</td>'
     + '<td><span class="badge ' + t.status + '">' + t.status + '</span></td>'
     + '<td>' + fmtGB(t.upload_bytes) + '</td>'
     + '<td>' + fmtGB(t.download_bytes) + '</td>'
@@ -1460,8 +1501,10 @@ function pollData() {
         runningTasks.forEach(function(t) {
           var row = document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]');
           if (!row) return;
+          var pCol = row.querySelector('.progress-col');
           var upCol = row.querySelector('.up-col');
           var dnCol = row.querySelector('.down-col');
+          if (pCol) pCol.innerHTML = buildProgress(t);
           if (upCol) upCol.textContent = fmtGB(t.upload_bytes);
           if (dnCol) dnCol.textContent = fmtGB(t.download_bytes);
           var badge = row.querySelector('.badge');
@@ -1688,6 +1731,42 @@ if (toggleHistoryBtnEl) toggleHistoryBtnEl.addEventListener('click', function() 
 				loc := time.FixedZone("CST", 8*3600)
 				return t.In(loc).Format("01-02 15:04")
 			},
+			"fmtDurationHTML": func(s int) string {
+				if s < 60 {
+					return fmt.Sprintf("%d 秒", s)
+				}
+				if s < 3600 {
+					return fmt.Sprintf("%d 分钟", s/60)
+				}
+				if s < 86400 {
+					return fmt.Sprintf("%.1f 小时", float64(s)/3600.0)
+				}
+				return fmt.Sprintf("%.1f 天", float64(s)/86400.0)
+			},
+			"buildProgressHTML": func(t Task) template.HTML {
+				if t.Status == "pending" {
+					return template.HTML(`<span class="note">0%</span>`)
+				}
+				if t.Status != "running" && t.Status != "stopping" {
+					return template.HTML(`-`)
+				}
+				if t.StartedAt == "" {
+					return template.HTML(`-`)
+				}
+				ts, err := time.Parse(time.RFC3339, t.StartedAt)
+				if err != nil {
+					return template.HTML(`-`)
+				}
+				elapsed := time.Since(ts).Seconds()
+				if elapsed < 0 {
+					return template.HTML(`0%`)
+				}
+				pct := (elapsed / float64(t.DurationSec)) * 100
+				if pct > 100 {
+					pct = 100
+				}
+				return template.HTML(fmt.Sprintf("%.1f%%", pct))
+			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
 			Clients:         clients,
@@ -1865,7 +1944,11 @@ func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.Handler
 func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		clientID := r.Form.Get("client_id")
+		clientIDs := r.Form["client_id"]
+		if len(clientIDs) == 0 {
+			http.Error(w, "no client selected", 400)
+			return
+		}
 		mode := r.Form.Get("mode")
 		up, _ := strconv.Atoi(r.Form.Get("up_mbps"))
 		down, _ := strconv.Atoi(r.Form.Get("down_mbps"))
@@ -1881,18 +1964,20 @@ func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) 
 		if down < 0 {
 			down = 0
 		}
-		id := genToken(8)
-		_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-			id, clientID, mode, up, down, dur, "pending", time.Now().Format(time.RFC3339))
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+		now := time.Now().Format(time.RFC3339)
+		
+		for _, clientID := range clientIDs {
+			id := genToken(8)
+			_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+				id, clientID, mode, up, down, dur, "pending", now)
+			if err == nil {
+				clientName := clientID
+				_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
+				go barkPush(cfg.BarkURL, "任务已创建",
+					fmt.Sprintf("客户端 %s 新任务已创建\n模式:%s 上传:%dMbps 下载:%dMbps 时长:%ds",
+						clientName, mode, up, down, dur))
+			}
 		}
-		clientName := clientID
-		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
-		go barkPush(cfg.BarkURL, "任务已创建",
-			fmt.Sprintf("客户端 %s 新任务已创建\n模式:%s 上传:%dMbps 下载:%dMbps 时长:%ds",
-				clientName, mode, up, down, dur))
 		broker.Publish("tasks")
 		http.Redirect(w, r, panelPath, http.StatusFound)
 	}
@@ -1914,6 +1999,20 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 				_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
 			}
 		}
+		broker.Publish("tasks")
+		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			!strings.Contains(r.Header.Get("Accept"), "application/json") {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+}
+
+func handleClearHistory(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, _ = db.Exec(`DELETE FROM tasks WHERE status IN ('stopped', 'done')`)
 		broker.Publish("tasks")
 		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
 			!strings.Contains(r.Header.Get("Accept"), "application/json") {
