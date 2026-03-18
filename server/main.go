@@ -26,7 +26,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var Version = "v0.4.16"
+var Version = "v0.4.17"
 
 type Config struct {
 	PanelAddr  string
@@ -457,9 +457,9 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 	httpHeader := []byte("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nServer: nginx/1.24.0\r\nConnection: keep-alive\r\n\r\n")
 	_, _ = w.Write(httpHeader)
 
-	// Jitter / Human-like burst algorithm
+	// Jitter / Human-like burst algorithm (Micro-sleep to prevent peak spikes)
 	for time.Now().Before(deadline) && keep() {
-		sleepMs := mrand.Intn(2500) + 1000 // Sleep 1s ~ 3.5s
+		sleepMs := mrand.Intn(200) + 50 // Sleep 50ms ~ 250ms
 		time.Sleep(time.Duration(sleepMs) * time.Millisecond)
 
 		if !keep() || time.Now().After(deadline) {
@@ -467,7 +467,7 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 		}
 
 		baseChunk := bytesPerSec * int64(sleepMs) / 1000
-		jitter := baseChunk / 5
+		jitter := baseChunk / 10 // 10% jitter
 		if jitter <= 0 {
 			jitter = 1
 		}
