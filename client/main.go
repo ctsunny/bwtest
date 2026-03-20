@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,9 +15,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -87,6 +92,9 @@ type DataHello struct {
 var busy int32
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
+// shutdownCh is closed when a shutdown signal is received.
+var shutdownCh = make(chan struct{})
+
 type logBuffer struct {
 	lines []string
 	max   int
@@ -136,11 +144,31 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stdout, logBuf))
 	log.Printf("bwagent %s starting...", Version)
 
+	// Graceful shutdown: close shutdownCh on SIGINT / SIGTERM so that
+	// all loops can exit cleanly without abruptly killing running tasks.
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		s := <-sig
+		log.Printf("bwagent: received %v, shutting down gracefully...", s)
+		close(shutdownCh)
+	}()
+
 	// register with retry
 	for {
+		select {
+		case <-shutdownCh:
+			log.Printf("bwagent: shutdown before registration")
+			return
+		default:
+		}
 		if err := register(cfg); err != nil {
 			log.Printf("register error: %v, retrying in 10s...", err)
-			time.Sleep(10 * time.Second)
+			select {
+			case <-time.After(10 * time.Second):
+			case <-shutdownCh:
+				return
+			}
 			continue
 		}
 		break
@@ -242,7 +270,19 @@ func pollLoop(cfg *Config) {
 	tk := time.NewTicker(5 * time.Second)
 	defer tk.Stop()
 
-	for range tk.C {
+	for {
+		select {
+		case <-shutdownCh:
+			// Wait for any in-flight task to finish before exiting.
+			log.Printf("pollLoop: shutdown signal received, waiting for in-flight task...")
+			for atomic.LoadInt32(&busy) == 1 {
+				time.Sleep(500 * time.Millisecond)
+			}
+			log.Printf("pollLoop: all tasks done, exiting")
+			return
+		case <-tk.C:
+		}
+
 		if atomic.LoadInt32(&busy) == 1 {
 			continue
 		}
@@ -621,7 +661,7 @@ func hostname() string {
 }
 
 // selfUpgrade 安全地将自身升级到指定版本。
-// 流程：下载临时文件 → 验证 → 原子替换旧二进制 → 重启服务
+// 流程：下载临时文件 → SHA256 完整性校验 → 原子替换旧二进制 → 重启服务
 func selfUpgrade(version string) {
 	// 确定下载架构
 	arch := runtime.GOARCH // "amd64" / "arm64"
@@ -630,11 +670,14 @@ func selfUpgrade(version string) {
 		return
 	}
 
-	var dlURL string
+	binaryName := fmt.Sprintf("bwagent-linux-%s", arch)
+	var dlURL, sha256SumsURL string
 	if version == "latest" {
-		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/latest/download/bwagent-linux-%s", arch)
+		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/latest/download/%s", binaryName)
+		sha256SumsURL = "https://github.com/ctsunny/bwtest/releases/latest/download/SHA256SUMS"
 	} else {
-		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/download/%s/bwagent-linux-%s", version, arch)
+		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/download/%s/%s", version, binaryName)
+		sha256SumsURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/download/%s/SHA256SUMS", version)
 	}
 	log.Printf("[upgrade] 开始下载 %s", dlURL)
 
@@ -673,6 +716,14 @@ func selfUpgrade(version string) {
 	}
 	log.Printf("[upgrade] 下载完成，文件大小 %d 字节", n)
 
+	// SHA256 完整性校验：防止下载被篡改或传输损坏。
+	// 如果此版本没有 SHA256SUMS 文件（例如旧版本发布），校验会被跳过并打印警告。
+	if err := verifySHA256(tmpPath, sha256SumsURL, binaryName, dlClient); err != nil {
+		log.Printf("[upgrade] SHA256 校验失败: %v，中止升级", err)
+		_ = os.Remove(tmpPath)
+		return
+	}
+
 	// 原子替换：先备份，再 rename
 	backupPath := exePath + ".bak"
 	_ = os.Remove(backupPath)
@@ -699,5 +750,65 @@ func selfUpgrade(version string) {
 		log.Printf("[upgrade] sudo systemctl restart 不可用(%v)，通过 os.Exit(0) 触发 systemd respawn", err)
 	}
 	os.Exit(0)
+}
+
+// verifySHA256 downloads SHA256SUMS from sumsURL and verifies that the file at
+// filePath matches the expected hash for binaryName.
+// Returns nil if the SHA256SUMS file is not found (HTTP 404), enabling graceful
+// fallback for releases that predate SHA256SUMS publishing.
+func verifySHA256(filePath, sumsURL, binaryName string, client *http.Client) error {
+	resp, err := client.Get(sumsURL)
+	if err != nil {
+		return fmt.Errorf("下载 SHA256SUMS 失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// SHA256SUMS 不存在（旧版本发布），跳过校验但记录警告。
+		log.Printf("[upgrade] ⚠️  SHA256SUMS 不存在于此版本发布，跳过完整性校验")
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载 SHA256SUMS 返回 HTTP %d", resp.StatusCode)
+	}
+
+	// 在 SHA256SUMS 中找到匹配 binaryName 的行
+	// 格式：<hash>  <filename>  或  <hash> *<filename>
+	var expectedHash string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			// 去掉 BSD 风格的 * 前缀
+			name := strings.TrimPrefix(fields[1], "*")
+			if name == binaryName {
+				expectedHash = strings.ToLower(fields[0])
+				break
+			}
+		}
+	}
+	if expectedHash == "" {
+		return fmt.Errorf("SHA256SUMS 中未找到 %q 的校验值", binaryName)
+	}
+
+	// 计算已下载文件的 SHA256
+	fp, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("打开文件失败: %v", err)
+	}
+	defer fp.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, fp); err != nil {
+		return fmt.Errorf("计算 SHA256 失败: %v", err)
+	}
+	actualHash := hex.EncodeToString(h.Sum(nil))
+
+	if actualHash != expectedHash {
+		return fmt.Errorf("SHA256 不匹配: 期望 %s，实际 %s", expectedHash, actualHash)
+	}
+	log.Printf("[upgrade] ✓ SHA256 校验通过: %s", actualHash)
+	return nil
 }
 
