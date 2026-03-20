@@ -970,51 +970,103 @@ func handleServerPage(panelPath string, cfg *Config) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>服务器 Linux 管理</title>
+<title>服务器管理 — 带宽测试面板</title>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
-  background:#f5f7fb;color:#111827;margin:0;padding:20px}
-.wrap{max-width:700px;margin:0 auto}
-.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:22px;margin-bottom:18px;
-  box-shadow:0 1px 3px rgba(0,0,0,.05)}
-h1{margin:0 0 6px;font-size:26px}h2{margin:0 0 14px;font-size:18px}
-.row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f3f4f6;font-size:14px}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root{
+  --primary:#6366f1;--primary-dk:#4f46e5;--primary-glow:rgba(99,102,241,.15);
+  --no:#ef4444;--no-bg:rgba(239,68,68,.1);--warn:#f59e0b;
+  --bg:#f8fafc;--surf:#fff;--surf2:#f1f5f9;--bdr:#e2e8f0;
+  --tx:#0f172a;--tx2:#475569;--tx3:#94a3b8;
+  --r:12px;--r-sm:8px;--r-lg:16px;--r-pill:9999px;
+  --sh:0 1px 3px rgba(0,0,0,.06),0 4px 8px rgba(0,0,0,.04);
+  --sh-lg:0 8px 24px rgba(0,0,0,.08),0 2px 8px rgba(0,0,0,.04);
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --primary:#818cf8;--primary-dk:#6366f1;--primary-glow:rgba(129,140,248,.15);
+    --no:#f87171;--no-bg:rgba(248,113,113,.12);--warn:#fbbf24;
+    --bg:#060d1b;--surf:#0f172a;--surf2:#1a2236;--bdr:#1e293b;
+    --tx:#f1f5f9;--tx2:#94a3b8;--tx3:#475569;
+  }
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;
+  background:var(--bg);color:var(--tx);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.nav{position:sticky;top:0;z-index:100;height:60px;display:flex;align-items:center;gap:12px;
+  padding:0 24px;background:var(--surf);border-bottom:1px solid var(--bdr)}
+.nav-icon{width:34px;height:34px;background:linear-gradient(135deg,var(--primary),var(--primary-dk));
+  border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;
+  box-shadow:0 3px 10px var(--primary-glow);flex-shrink:0}
+.nav-title{font-weight:800;font-size:17px;letter-spacing:-.03em}
+.page{max-width:760px;margin:0 auto;padding:28px 24px 60px}
+.card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r-lg);
+  padding:24px;margin-bottom:20px;box-shadow:var(--sh)}
+.card-hd{display:flex;align-items:center;gap:10px;margin-bottom:18px}
+.card-hd-icon{width:30px;height:30px;border-radius:8px;background:var(--surf2);
+  display:flex;align-items:center;justify-content:center;font-size:14px}
+h2{font-size:15px;font-weight:700;color:var(--tx)}
+.row{display:flex;justify-content:space-between;align-items:center;
+  padding:11px 0;border-bottom:1px solid var(--bdr);gap:12px}
 .row:last-child{border-bottom:none}
-.label{color:#6b7280}
-.val{font-family:monospace;font-size:13px;color:#111827;word-break:break-all;text-align:right;max-width:70%%}
-button,.btn{border:none;border-radius:9px;padding:10px 18px;background:#2563eb;color:#fff;cursor:pointer;
-  font-size:14px;text-decoration:none;display:inline-block}
-button:hover,.btn:hover{background:#1d4ed8}
-button.danger{background:#ef4444}button.danger:hover{background:#dc2626}
-button.sec{background:#e5e7eb;color:#111}button.sec:hover{background:#d1d5db}
-.toolbar{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
-</style></head>
-<body><div class="wrap">
+.row-label{font-size:13px;color:var(--tx2);font-weight:500;flex-shrink:0}
+.row-val{font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--tx);
+  word-break:break-all;text-align:right;max-width:70%%}
+button,.btn{display:inline-flex;align-items:center;gap:5px;padding:9px 16px;border:none;
+  border-radius:var(--r-sm);font-size:13px;font-weight:600;cursor:pointer;
+  text-decoration:none;font-family:inherit;line-height:1;white-space:nowrap;
+  transition:filter .15s,transform .12s}
+button:hover,.btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+button:active,.btn:active{transform:translateY(0);filter:brightness(.96)}
+button{background:var(--primary);color:#fff}
+button.danger{background:var(--no);color:#fff}
+button.sec,.btn.sec{background:var(--surf2);color:var(--tx2);border:1px solid var(--bdr)}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+.note{font-size:13px;color:var(--tx3);margin-bottom:16px}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <div class="nav-icon">🐧</div>
+  <span class="nav-title">服务器管理</span>
+</nav>
+<div class="page">
+
 <div class="card">
-  <h1>🐧 服务器 Linux 管理</h1>
-  <p style="color:#6b7280;font-size:14px;margin:0 0 16px">服务状态查看与系统操作</p>
+  <div class="card-hd">
+    <div class="card-hd-icon">🐧</div>
+    <h2>服务器 Linux 管理</h2>
+  </div>
+  <p class="note">服务状态查看与系统操作</p>
   <a class="btn sec" href="%s">← 返回面板</a>
 </div>
 
 <div class="card">
-  <h2>📋 运行信息</h2>
-  <div class="row"><span class="label">面板监听地址</span><span class="val">%s</span></div>
-  <div class="row"><span class="label">数据端口</span><span class="val">%s</span></div>
-  <div class="row"><span class="label">服务器 Host</span><span class="val">%s</span></div>
-  <div class="row"><span class="label">数据库路径</span><span class="val">%s</span></div>
-  <div class="row"><span class="label">面板路径</span><span class="val">%s</span></div>
-  <div class="row"><span class="label">Bark 推送</span><span class="val">%s</span></div>
-  <div class="row"><span class="label">Bark Token</span><span class="val">%s</span></div>
+  <div class="card-hd">
+    <div class="card-hd-icon">📋</div>
+    <h2>运行信息</h2>
+  </div>
+  <div class="row"><span class="row-label">面板监听地址</span><span class="row-val">%s</span></div>
+  <div class="row"><span class="row-label">数据端口</span><span class="row-val">%s</span></div>
+  <div class="row"><span class="row-label">服务器 Host</span><span class="row-val">%s</span></div>
+  <div class="row"><span class="row-label">数据库路径</span><span class="row-val">%s</span></div>
+  <div class="row"><span class="row-label">面板路径</span><span class="row-val">%s</span></div>
+  <div class="row"><span class="row-label">Bark 推送</span><span class="row-val">%s</span></div>
+  <div class="row"><span class="row-label">Bark Token</span><span class="row-val">%s</span></div>
 </div>
 
 <div class="card">
-  <h2>⚙️ 系统操作</h2>
-  <p style="font-size:13px;color:#6b7280;margin-bottom:14px">重启服务后面板约1秒内不可访问，会自动恢复。</p>
-  <div class="toolbar">
+  <div class="card-hd">
+    <div class="card-hd-icon">⚙️</div>
+    <h2>系统操作</h2>
+  </div>
+  <p class="note">重启服务后面板约1秒内不可访问，会自动恢复。</p>
+  <div class="actions">
     <button id="restartBtn" class="danger">🔄 重启 bwpanel 服务</button>
     <a class="btn sec" href="%s/settings">⚙️ Bark 设置</a>
   </div>
 </div>
+
 </div>
 <script>
 (function(){
@@ -1126,212 +1178,358 @@ func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>带宽测试面板</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 :root {
-  --bg: #f5f7fb;
-  --card: #ffffff;
-  --card-glass: rgba(255, 255, 255, 0.85);
-  --border: #e5e7eb;
-  --text: #111827;
-  --muted: #6b7280;
-  --primary: #2563eb;
-  --primary-glow: rgba(37, 99, 235, 0.4);
-  --ok: #16a34a;
-  --no: #dc2626;
-  --run: #2563eb;
-  --pend: #4b5563;
-  --stop: #ea580c;
-  --warn: #d97706;
-  --radius: 16px;
-  --shadow: 0 4px 12px rgba(0,0,0,0.04);
+  --primary: #6366f1; --primary-dk: #4f46e5; --primary-lt: #a5b4fc;
+  --primary-glow: rgba(99,102,241,.15);
+  --ok: #10b981; --ok-bg: rgba(16,185,129,.1); --ok-txt: #059669;
+  --warn: #f59e0b; --warn-bg: rgba(245,158,11,.1); --warn-txt: #b45309;
+  --no: #ef4444; --no-bg: rgba(239,68,68,.1); --no-txt: #dc2626;
+  --info: #3b82f6; --info-bg: rgba(59,130,246,.1); --info-txt: #2563eb;
+  --orange: #f97316; --orange-bg: rgba(249,115,22,.1);
+  --bg: #f8fafc; --surf: #fff; --surf2: #f1f5f9;
+  --bdr: #e2e8f0; --bdr2: #cbd5e1;
+  --tx: #0f172a; --tx2: #475569; --tx3: #94a3b8;
+  --r: 12px; --r-sm: 8px; --r-lg: 16px; --r-pill: 9999px;
+  --sh: 0 1px 3px rgba(0,0,0,.06), 0 4px 8px rgba(0,0,0,.04);
+  --sh-lg: 0 8px 24px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04);
+  --sh-xl: 0 24px 48px rgba(0,0,0,.12), 0 8px 16px rgba(0,0,0,.06);
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f172a;
-    --card: #1e293b;
-    --card-glass: rgba(30, 41, 59, 0.8);
-    --border: #334155;
-    --text: #f1f5f9;
-    --muted: #94a3b8;
-    --primary: #3b82f6;
-    --primary-glow: rgba(59, 130, 246, 0.5);
+    --primary: #818cf8; --primary-dk: #6366f1; --primary-lt: #c7d2fe;
+    --primary-glow: rgba(129,140,248,.15);
+    --ok: #34d399; --ok-bg: rgba(52,211,153,.12); --ok-txt: #6ee7b7;
+    --warn: #fbbf24; --warn-bg: rgba(251,191,36,.12); --warn-txt: #fde68a;
+    --no: #f87171; --no-bg: rgba(248,113,113,.12); --no-txt: #fca5a5;
+    --info: #60a5fa; --info-bg: rgba(96,165,250,.12); --info-txt: #93c5fd;
+    --orange: #fb923c; --orange-bg: rgba(251,146,60,.12);
+    --bg: #060d1b; --surf: #0f172a; --surf2: #1a2236;
+    --bdr: #1e293b; --bdr2: #334155;
+    --tx: #f1f5f9; --tx2: #94a3b8; --tx3: #475569;
+    --sh: 0 1px 3px rgba(0,0,0,.3), 0 4px 8px rgba(0,0,0,.2);
+    --sh-lg: 0 8px 24px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.2);
+    --sh-xl: 0 24px 48px rgba(0,0,0,.65), 0 8px 16px rgba(0,0,0,.3);
   }
 }
-* { box-sizing: border-box; transition: background-color 0.2s, border-color 0.2s, transform 0.1s; }
-body { margin: 0; padding: 20px; font-family: 'Inter', -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
-.wrap { max-width: 1400px; margin: 0 auto; }
-
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg); color: var(--tx); font-size: 14px; line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+/* ── Nav ── */
+.nav {
+  position: sticky; top: 0; z-index: 200; height: 60px;
+  display: flex; align-items: center; gap: 12px; padding: 0 24px;
+  background: var(--surf); border-bottom: 1px solid var(--bdr);
+  box-shadow: 0 1px 0 var(--bdr);
+}
+.nav-logo {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 800; font-size: 17px; letter-spacing: -.03em;
+  text-decoration: none; color: var(--tx);
+}
+.nav-icon {
+  width: 34px; height: 34px; background: linear-gradient(135deg, var(--primary), var(--primary-dk));
+  border-radius: 9px; display: flex; align-items: center; justify-content: center;
+  font-size: 17px; box-shadow: 0 3px 10px var(--primary-glow); flex-shrink: 0;
+}
+.ver-badge {
+  display: inline-flex; align-items: center; padding: 2px 8px;
+  background: var(--primary-glow); color: var(--primary); border-radius: var(--r-pill);
+  font-size: 11px; font-weight: 600; vertical-align: middle; margin-left: 6px;
+}
+.nav-spacer { flex: 1; }
+.nav-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--tx3); flex-shrink: 0; }
+.live-dot {
+  width: 7px; height: 7px; background: var(--ok); border-radius: 50%;
+  animation: pulse 2.4s ease infinite; flex-shrink: 0;
+}
+@keyframes pulse {
+  0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(16,185,129,.4); }
+  50% { opacity:.6; box-shadow:0 0 0 5px rgba(16,185,129,0); }
+}
+.nav-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* ── Page ── */
+.wrap { max-width: 1440px; margin: 0 auto; padding: 24px 24px 60px; }
+/* ── Card ── */
 .card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 24px;
-  margin-bottom: 24px;
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(12px);
+  background: var(--surf); border: 1px solid var(--bdr);
+  border-radius: var(--r-lg); padding: 24px; margin-bottom: 20px;
+  box-shadow: var(--sh);
 }
-.card-glass { background: var(--card-glass); }
-
-h1 { margin: 0 0 4px; font-size: 32px; font-weight: 800; letter-spacing: -0.025em; }
-h2 { margin: 0 0 16px; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-.stat-card { padding: 20px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--card); }
-.stat-val { font-size: 28px; font-weight: 800; margin-top: 4px; }
-.stat-label { color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-
-.toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; align-items: center; justify-content: space-between; }
+.card-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 18px; flex-wrap: wrap; gap: 10px;
+}
+.card-hd-left { display: flex; align-items: center; gap: 10px; }
+h1 { font-size: 22px; font-weight: 800; letter-spacing: -.03em; color: var(--tx); }
+h2 { font-size: 15px; font-weight: 700; color: var(--tx); display: flex; align-items: center; gap: 8px; margin: 0; }
+.h2-icon {
+  width: 30px; height: 30px; border-radius: 8px; background: var(--surf2);
+  display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0;
+}
+/* ── Stats ── */
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+.stat-card {
+  background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--r-lg);
+  padding: 18px 20px; box-shadow: var(--sh); display: flex; align-items: center; gap: 14px;
+  transition: transform .15s, box-shadow .15s;
+}
+.stat-card:hover { transform: translateY(-2px); box-shadow: var(--sh-lg); }
+.stat-ico {
+  width: 44px; height: 44px; border-radius: 11px;
+  display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0;
+}
+.stat-ico.c1 { background: var(--info-bg); }
+.stat-ico.c2 { background: var(--ok-bg); }
+.stat-ico.c3 { background: var(--warn-bg); }
+.stat-ico.c4 { background: var(--primary-glow); }
+.stat-body { flex: 1; min-width: 0; }
+.stat-label { font-size: 11px; font-weight: 600; color: var(--tx3); text-transform: uppercase; letter-spacing: .06em; }
+.stat-val { font-size: 26px; font-weight: 800; color: var(--tx); letter-spacing: -.03em; line-height: 1.2; margin-top: 2px; }
+/* ── Buttons ── */
 button, .btn {
-  border: none; border-radius: 10px; padding: 10px 16px; background: var(--primary); color: #fff; cursor: pointer;
-  font-size: 14px; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 8px 14px; border: none; border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  text-decoration: none; font-family: inherit; line-height: 1; white-space: nowrap;
+  transition: filter .15s, transform .12s, box-shadow .15s;
 }
-button:hover, .btn:hover { background: var(--primary); filter: brightness(1.1); transform: translateY(-1px); }
-button:active, .btn:active { transform: scale(0.98); }
-button.sec { background: var(--border); color: var(--text); }
-button.danger { background: var(--no); }
-button.warn { background: var(--warn); }
-button.info { background: #0891b2; }
-
-.tbl-wrap { overflow-x: auto; margin: 0 -10px; padding: 0 10px; }
+button:hover, .btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+button:active, .btn:active { transform: translateY(0); filter: brightness(.96); }
+button:disabled, .btn:disabled { opacity: .5; cursor: not-allowed; pointer-events: none; }
+button { background: var(--primary); color: #fff; }
+button.sec, .btn.sec { background: var(--surf2); color: var(--tx2); border: 1px solid var(--bdr); }
+button.danger { background: var(--no); color: #fff; }
+button.warn { background: var(--warn); color: #fff; }
+button.info { background: var(--info); color: #fff; }
+/* ── Table ── */
+.tbl-wrap { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; }
-th { text-align: left; padding: 14px 12px; font-size: 12px; font-weight: 700; color: var(--muted); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.05em; }
-td { padding: 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
-tr:hover td { background: rgba(0,0,0,0.02); }
-
-.badge { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-.badge.running { background: #dbeafe; color: #1e40af; }
-.badge.done { background: #dcfce7; color: #166534; }
-.badge.pending { background: #f1f5f9; color: #475569; }
-.badge.stopping { background: #ffedd5; color: #9a3412; }
-
-.progress-bar-container { width: 120px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; position: relative; }
-.progress-bar-fill { height: 100%; background: var(--run); width: 0%; border-radius: 3px; box-shadow: 0 0 8px var(--primary-glow); transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
-
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; align-items: flex-end; }
-input, select, textarea {
-  width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); font-size: 14px;
+th {
+  padding: 9px 14px; font-size: 11px; font-weight: 700; color: var(--tx3);
+  text-transform: uppercase; letter-spacing: .07em; background: var(--surf2);
+  border-bottom: 1px solid var(--bdr); text-align: left; white-space: nowrap;
 }
-input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px var(--primary-glow); }
-
+th:first-child { border-radius: 8px 0 0 8px; }
+th:last-child { border-radius: 0 8px 8px 0; }
+td { padding: 11px 14px; border-bottom: 1px solid var(--bdr); font-size: 13px; vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr { transition: background .1s; }
+tbody tr:hover td { background: var(--surf2); }
+/* ── Badge ── */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px;
+  border-radius: var(--r-pill); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .04em; white-space: nowrap;
+}
+.badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.badge.running { background: var(--info-bg); color: var(--info); }
+.badge.done { background: var(--ok-bg); color: var(--ok); }
+.badge.pending { background: var(--surf2); color: var(--tx3); border: 1px solid var(--bdr); }
+.badge.stopping { background: var(--orange-bg); color: var(--orange); }
+/* ── Progress ── */
+.progress-bar-container { width: 90px; height: 4px; background: var(--bdr); border-radius: 2px; overflow: hidden; }
+.progress-bar-fill {
+  height: 100%; background: linear-gradient(90deg, var(--primary), var(--primary-lt));
+  border-radius: 2px; transition: width .6s cubic-bezier(.4,0,.2,1);
+}
+/* ── Form ── */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: flex-end; }
+label.note, .note { font-size: 12px; font-weight: 600; color: var(--tx2); }
+input, select, textarea {
+  width: 100%; padding: 9px 11px; border: 1.5px solid var(--bdr); border-radius: var(--r-sm);
+  background: var(--surf); color: var(--tx); font-size: 13px; font-family: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.dur-wrap { display: flex; gap: 6px; }
+.dur-wrap input { flex: 1; }
+.dur-wrap select { width: auto; min-width: 72px; flex-shrink: 0; }
+/* ── Toolbar ── */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; align-items: center; justify-content: space-between; }
+/* ── Misc ── */
+.tip { font-size: 12px; color: var(--tx3); margin-top: 8px; }
+.copy-box { display: flex; gap: 8px; align-items: center; }
+.copy-box input { font-family: 'SF Mono','Fira Code',monospace; font-size: 12px; background: var(--surf2); }
+.ping-ok { color: var(--ok); font-weight: 600; font-size: 12px; }
+.ping-warn { color: var(--warn); font-weight: 600; font-size: 12px; }
+.ping-dead { color: var(--tx3); font-size: 12px; }
+/* ── Modal ── */
 .modal-overlay {
-  display: flex; visibility: hidden; opacity: 0; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000;
-  align-items: center; justify-content: center; backdrop-filter: blur(4px); transition: 0.2s;
+  position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(8px); visibility: hidden; opacity: 0;
+  transition: visibility .2s, opacity .2s;
 }
 .modal-overlay.open { visibility: visible; opacity: 1; }
 .modal-inner {
-  background: var(--card); border-radius: var(--radius); padding: 32px; width: min(550px, 95vw); transform: scale(0.9); transition: 0.2s;
-  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04);
+  background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--r-lg);
+  padding: 28px; width: min(560px, 95vw); box-shadow: var(--sh-xl);
+  transform: scale(.92) translateY(10px); opacity: 0;
+  transition: transform .25s cubic-bezier(.34,1.56,.64,1), opacity .2s;
 }
-.modal-overlay.open .modal-inner { transform: scale(1); }
-
+.modal-overlay.open .modal-inner { transform: scale(1) translateY(0); opacity: 1; }
+.modal-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.modal-title { font-size: 16px; font-weight: 700; }
+.modal-x {
+  background: var(--surf2); border: 1px solid var(--bdr); border-radius: 6px;
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; font-size: 15px; color: var(--tx3); padding: 0; line-height: 1; flex-shrink: 0;
+}
+.modal-x:hover { background: var(--no-bg); color: var(--no); border-color: var(--no-bg); transform: none; filter: none; }
+/* ── Log viewer ── */
+#logsContent {
+  background: #0d1117; color: #e6edf3; padding: 14px; border-radius: 8px;
+  font-family: 'SF Mono','Fira Code',monospace; font-size: 12px; line-height: 1.6;
+  height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  border: 1px solid var(--bdr);
+}
+#logsContent::-webkit-scrollbar { width: 5px; }
+#logsContent::-webkit-scrollbar-track { background: transparent; }
+#logsContent::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+/* ── Responsive ── */
+@media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 768px) {
-  body { padding: 12px; }
+  .wrap { padding: 12px 12px 40px; }
+  .nav { padding: 0 14px; height: auto; min-height: 60px; flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; }
+  .nav-acts { order: 3; width: 100%; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
   th { display: none; }
-  td { display: block; padding: 6px 12px; border: none; text-align: right; }
-  td::before { content: attr(data-label); float: left; font-weight: 700; color: var(--muted); }
-  tr { display: block; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 12px; padding: 12px 0; }
+  td { display: block; padding: 7px 14px; border: none; text-align: right; font-size: 13px; }
+  td::before { content: attr(data-label); float: left; font-weight: 600; color: var(--tx3); font-size: 11px; text-transform: uppercase; }
+  tr { display: block; border: 1px solid var(--bdr); border-radius: 10px; margin-bottom: 8px; padding: 6px 0; }
+  tbody tr:hover td { background: transparent; }
   .grid { grid-template-columns: 1fr; }
 }
+@media (max-width: 480px) { .stats-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
+
+<!-- ── Navigation Bar ────────────────────────────────────────────── -->
+<nav class="nav">
+  <a class="nav-logo" href="#">
+    <div class="nav-icon">⚡</div>
+    带宽测试面板
+    <span class="ver-badge">{{.Version}}</span>
+  </a>
+  <div class="nav-spacer"></div>
+  <div class="nav-status">
+    <div class="live-dot"></div>
+    <span id="liveStatus">同步中...</span>
+  </div>
+  <div class="nav-acts">
+    <button type="button" id="reloadBtn" class="sec">🔄 刷新</button>
+    <button type="button" class="sec" id="toggleHistoryBtn">📜 历史任务</button>
+    <button type="button" class="warn" id="upgradeAllBtn">🚀 一键升级</button>
+    <button type="button" class="info" onclick="document.getElementById('genModal').classList.add('open')">➕ 接入客户端</button>
+    <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ 设置</a>
+    <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器</a>
+  </div>
+</nav>
+
 <div class="wrap">
 
-<div class="card card-glass">
-  <h1>带宽测试面板 <span class="ver-badge">{{.Version}}</span></h1>
-  <p>实时监控、分布式测速与任务分发平台。</p>
-  <div class="toolbar">
-    <div style="display:flex; gap:8px; align-items:center">
-      <button type="button" id="reloadBtn">🔄 手动刷新</button>
-      <button type="button" class="sec" id="toggleHistoryBtn">📜 历史任务</button>
-      <span id="liveStatus" class="note">数据自动同步中...</span>
-    </div>
-    <div style="display:flex; gap:8px">
-      <button type="button" class="warn" id="upgradeAllBtn">🚀 一键升级所有</button>
-      <button type="button" class="info" onclick="document.getElementById('genModal').classList.add('open')">➕ 接入新客户端</button>
-      <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ 设置</a>
-      <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器</a>
-    </div>
-  </div>
-</div>
-
+<!-- ── Stats ─────────────────────────────────────────────────────── -->
 <div class="stats-grid">
   <div class="stat-card">
-    <div class="stat-label">在线客户端</div>
-    <div id="statOnline" class="stat-val">-</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">运行中任务</div>
-    <div id="statRunning" class="stat-val">-</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">待处理请求</div>
-    <div id="statPending" class="stat-val">-</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">总吞吐量</div>
-    <div id="statTraffic" class="stat-val">-</div>
-  </div>
-</div>
-
-<!-- 任务日志弹窗 -->
-<div id="logsModal" class="modal-overlay">
-  <div class="modal-inner" style="width:min(900px, 95vw)">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-      <h2 style="margin:0">📄 任务执行日志 (最近200条)</h2>
-      <button type="button" class="sec" onclick="document.getElementById('logsModal').classList.remove('open')">关闭</button>
+    <div class="stat-ico c1">🖥</div>
+    <div class="stat-body">
+      <div class="stat-label">在线客户端</div>
+      <div id="statOnline" class="stat-val">-</div>
     </div>
-    <div style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;font-family:monospace;font-size:12px;height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all" id="logsContent">正在加载...</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-ico c2">⚡</div>
+    <div class="stat-body">
+      <div class="stat-label">运行中任务</div>
+      <div id="statRunning" class="stat-val">-</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-ico c3">⏳</div>
+    <div class="stat-body">
+      <div class="stat-label">待处理请求</div>
+      <div id="statPending" class="stat-val">-</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-ico c4">📊</div>
+    <div class="stat-body">
+      <div class="stat-label">总吞吐量</div>
+      <div id="statTraffic" class="stat-val">-</div>
+    </div>
   </div>
 </div>
 
-<!-- 升级命令弹窗 -->
+<!-- ── 任务日志弹窗 ──────────────────────────────────────────────── -->
+<div id="logsModal" class="modal-overlay">
+  <div class="modal-inner" style="width:min(900px,95vw)">
+    <div class="modal-hd">
+      <span class="modal-title">📄 任务执行日志 <span style="font-size:12px;font-weight:400;color:var(--tx3)">(最近200条)</span></span>
+      <button type="button" class="modal-x" onclick="document.getElementById('logsModal').classList.remove('open')">✕</button>
+    </div>
+    <div id="logsContent">正在加载...</div>
+  </div>
+</div>
+
+<!-- ── 升级命令弹窗 ──────────────────────────────────────────────── -->
 <div id="upgradeModal" class="modal-overlay">
   <div class="modal-inner">
-    <h2>📦 客户端升级命令</h2>
-    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">在对应客户端 VPS 上以 root 运行此命令，配置文件将自动保留。</p>
+    <div class="modal-hd">
+      <span class="modal-title">📦 客户端升级命令</span>
+      <button type="button" class="modal-x" id="closeUpgradeBtn">✕</button>
+    </div>
+    <p style="margin-bottom:14px;font-size:13px;color:var(--tx3)">在对应客户端 VPS 上以 root 运行此命令，配置文件将自动保留。</p>
     <div class="copy-box">
       <input id="upgradeCmd" readonly>
       <button type="button" class="sec" id="copyUpgradeBtn">复制</button>
     </div>
-    <div style="margin-top:16px;display:flex;gap:8px">
-      <button type="button" class="sec" id="closeUpgradeBtn">关闭</button>
-    </div>
   </div>
 </div>
 
-<!-- 推送更新弹窗 -->
+<!-- ── 推送更新弹窗 ──────────────────────────────────────────────── -->
 <div id="pushUpgradeModal" class="modal-overlay">
   <div class="modal-inner" style="width:min(480px,95vw)">
-    <h2>🚀 推送自动更新</h2>
-    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">客户端下次心跳（约20秒内）将自动下载并替换二进制，然后重启 bwagent 服务。</p>
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;color:var(--muted)">目标客户端</label>
-      <input id="pushUpgradeClientName" readonly style="margin-top:4px;background:#f3f4f6">
+    <div class="modal-hd">
+      <span class="modal-title">🚀 推送自动更新</span>
+      <button type="button" class="modal-x" id="closePushUpgradeBtn">✕</button>
     </div>
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;color:var(--muted)">目标版本号（留空使用当前服务端版本）</label>
-      <input id="pushUpgradeVersion" placeholder="例：v0.2.1 或 latest" style="margin-top:4px">
+    <p style="margin-bottom:16px;font-size:13px;color:var(--tx3)">客户端下次心跳（约20秒内）将自动下载并替换二进制，然后重启 bwagent 服务。</p>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">目标客户端</label>
+      <input id="pushUpgradeClientName" readonly style="background:var(--surf2)">
+    </div>
+    <div style="margin-bottom:18px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">目标版本号（留空使用当前服务端版本）</label>
+      <input id="pushUpgradeVersion" placeholder="例：v0.2.1 或 latest">
     </div>
     <div style="display:flex;gap:8px">
       <button type="button" class="warn" id="confirmPushUpgradeBtn">确认推送</button>
-      <button type="button" class="sec" id="closePushUpgradeBtn">取消</button>
+      <button type="button" class="sec" onclick="document.getElementById('pushUpgradeModal').classList.remove('open')">取消</button>
     </div>
   </div>
 </div>
 
-<!-- 编辑客户端弹窗 -->
+<!-- ── 编辑客户端弹窗 ─────────────────────────────────────────────── -->
 <div id="editModal" class="modal-overlay">
   <div class="modal-inner" style="width:min(480px,95vw)">
-    <h2>编辑客户端</h2>
-    <div style="margin-bottom:10px">
-      <label style="font-size:13px;color:var(--muted)">名称</label>
-      <input id="editName" placeholder="名称" style="margin-top:4px">
+    <div class="modal-hd">
+      <span class="modal-title">✏️ 编辑客户端</span>
+      <button type="button" class="modal-x" onclick="document.getElementById('editModal').classList.remove('open')">✕</button>
     </div>
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;color:var(--muted)">备注</label>
-      <textarea id="editRemark" placeholder="备注（可选）" style="margin-top:4px"></textarea>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">名称</label>
+      <input id="editName" placeholder="客户端名称">
+    </div>
+    <div style="margin-bottom:18px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">备注</label>
+      <textarea id="editRemark" placeholder="备注（可选）" rows="3"></textarea>
     </div>
     <div style="display:flex;gap:8px">
       <button type="button" id="saveEditBtn">保存</button>
@@ -1340,27 +1538,28 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
   </div>
 </div>
 
-<!-- 增加客户端弹窗 -->
+<!-- ── 接入新客户端弹窗 ───────────────────────────────────────────── -->
 <div id="genModal" class="modal-overlay {{if .GeneratedCmd}}open{{end}}">
   <div class="modal-inner">
-    <h2>➕ 生成客户端</h2>
+    <div class="modal-hd">
+      <span class="modal-title">➕ 接入新客户端</span>
+      <button type="button" class="modal-x" onclick="document.getElementById('genModal').classList.remove('open')">✕</button>
+    </div>
     <form method="post" action="{{.PanelPath}}/gen/install-cmd">
       <div style="display:flex;flex-direction:column;gap:12px">
         <div>
-          <label class="note">客户端名称 *</label>
-          <input id="genName" name="gen_name" value="{{.GenName}}" required placeholder="例如：my-vps" style="margin-top:4px">
+          <label class="note" style="display:block;margin-bottom:4px">客户端名称 *</label>
+          <input id="genName" name="gen_name" value="{{.GenName}}" required placeholder="例如：my-vps">
         </div>
         <div>
-          <label class="note">备注（可选）</label>
-          <input id="genRemark" name="gen_remark" value="{{.GenRemark}}" placeholder="可选备注" style="margin-top:4px">
+          <label class="note" style="display:block;margin-bottom:4px">备注（可选）</label>
+          <input id="genRemark" name="gen_remark" value="{{.GenRemark}}" placeholder="可选备注">
         </div>
         <div>
-          <label class="note">版本号</label>
-          <input id="genVersion" name="gen_version" value="{{.GenVersion}}" style="margin-top:4px">
+          <label class="note" style="display:block;margin-bottom:4px">版本号</label>
+          <input id="genVersion" name="gen_version" value="{{.GenVersion}}">
         </div>
-        <div>
-          <button type="submit" id="genBtn" style="width:100%">生成命令</button>
-        </div>
+        <button type="submit" id="genBtn" style="width:100%">生成安装命令</button>
       </div>
     </form>
     <div class="copy-box" id="cmdBox" style="display:{{if .GeneratedCmd}}flex{{else}}none{{end}};margin-top:16px">
@@ -1368,31 +1567,37 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
       <button type="button" class="sec" id="copyCmdBtn">复制</button>
     </div>
     <div class="tip" id="cmdTip">{{if .GeneratedCmd}}将此命令复制到客户端 VPS 上执行即可完成安装与注册。{{end}}</div>
-    <div style="margin-top:16px;text-align:right">
-      <button type="button" class="sec" onclick="document.getElementById('genModal').classList.remove('open')">关闭</button>
-    </div>
   </div>
 </div>
 
+<!-- ── 客户端列表 ─────────────────────────────────────────────────── -->
 <div class="card">
-  <h2>🖥 客户端列表</h2>
+  <div class="card-hd">
+    <div class="card-hd-left">
+      <div class="h2-icon">🖥</div>
+      <h2>客户端列表</h2>
+    </div>
+  </div>
   <div class="tbl-wrap">
   <table>
-    <thead><tr><th>名称</th><th>版本</th><th>备注</th><th>批准</th><th>延迟</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th></tr></thead>
+    <thead><tr>
+      <th>名称</th><th>版本</th><th>备注</th><th>批准</th>
+      <th>延迟</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
+    </tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
     <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
-      <td data-label="名称">{{.Name}}</td>
-      <td data-label="版本"><span class="badge running" style="font-family:monospace">{{.Version}}</span></td>
-      <td data-label="备注">{{.Remark}}</td>
+      <td data-label="名称"><strong style="font-weight:600">{{.Name}}</strong></td>
+      <td data-label="版本"><code style="font-size:11px;background:var(--surf2);padding:2px 7px;border-radius:5px;border:1px solid var(--bdr);font-family:monospace">{{.Version}}</code></td>
+      <td data-label="备注" style="color:var(--tx2)">{{.Remark}}</td>
       <td data-label="批准">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
       <td data-label="延迟" class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
-      <td data-label="心跳" class="lastseen-col">{{.LastSeen | shortTime}}</td>
-      <td data-label="IP">{{.RemoteIP}}</td>
-      <td data-label="任务" class="curtask-col" style="font-family:monospace;font-size:11px">{{.CurrentTask}}</td>
+      <td data-label="心跳" class="lastseen-col" style="color:var(--tx3);font-size:12px">{{.LastSeen | shortTime}}</td>
+      <td data-label="IP" style="font-family:monospace;font-size:12px;color:var(--tx2)">{{.RemoteIP}}</td>
+      <td data-label="任务" class="curtask-col" style="font-family:monospace;font-size:11px;color:var(--tx3)">{{.CurrentTask}}</td>
       <td data-label="操作">
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-	        {{if (not .Approved)}}<button type="button" class="approve-btn" data-id="{{.ID}}">批准</button>{{end}}
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          {{if (not .Approved)}}<button type="button" class="approve-btn" data-id="{{.ID}}" style="background:var(--ok)">批准</button>{{end}}
           <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
           <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级码</button>
           <button type="button" class="warn push-upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">推送</button>
@@ -1406,8 +1611,14 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
   </div>
 </div>
 
+<!-- ── 创建任务 ───────────────────────────────────────────────────── -->
 <div class="card">
-  <h2>创建任务</h2>
+  <div class="card-hd">
+    <div class="card-hd-left">
+      <div class="h2-icon">➕</div>
+      <h2>创建任务</h2>
+    </div>
+  </div>
   <form id="taskForm" method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
@@ -1453,7 +1664,7 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
     </div>
   </form>
   <div class="tip">提示：按住 Ctrl 或 Shift 点击客户端名称可批量多选下发任务。</div>
-  <div style="margin-top:16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+  <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--bdr)">
     <span class="note" style="font-weight:700">⚡ 快速测速:</span>
     <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (10M)</button>
     <button type="button" class="sec flash-test-btn" data-mode="download">📥 1min 下载 (10M)</button>
@@ -1461,11 +1672,14 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
   </div>
 </div>
 
-
-
-<!-- 正在运行的任务 -->
+<!-- ── 正在运行的任务 ────────────────────────────────────────── -->
 <div class="card">
-  <h2>🟢 正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--muted);font-weight:400"></span></h2>
+  <div class="card-hd">
+    <div class="card-hd-left">
+      <div class="h2-icon">🟢</div>
+      <h2>正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--tx3);font-weight:400;margin-left:6px"></span></h2>
+    </div>
+  </div>
   <div class="tbl-wrap">
   <table>
     <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>状态</th><th>进度</th><th>延迟</th><th>已传</th><th>已拉</th><th>日期</th><th>操作</th></tr></thead>
@@ -1493,18 +1707,24 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
       </td>
     </tr>
     {{end}}
-	    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="12" style="text-align:center;color:var(--muted);padding:40px">暂无正在执行的任务</td></tr>{{end}}
+    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="12" style="text-align:center;color:var(--tx3);padding:48px 20px">
+      <div style="font-size:30px;margin-bottom:8px;opacity:.35">⚡</div>
+      <div style="font-size:14px">暂无正在执行的任务</div>
+    </td></tr>{{end}}
     </tbody>
   </table>
   </div>
 </div>
 
-<!-- 历史任务 -->
+<!-- ── 历史任务 ───────────────────────────────────────────────────── -->
 <div class="card" id="historyCard" style="display:none">
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px">
-    <h2 style="margin:0">📋 历史任务</h2>
+  <div class="card-hd">
+    <div class="card-hd-left">
+      <div class="h2-icon">📋</div>
+      <h2>历史任务</h2>
+    </div>
     <form method="post" action="{{.PanelPath}}/task/clear-history" onsubmit="return confirm('确认清空所有历史任务？')">
-      <button type="submit" class="sec danger">清空历史</button>
+      <button type="submit" class="danger sec">清空历史</button>
     </form>
   </div>
   <div class="tbl-wrap">
@@ -1532,13 +1752,16 @@ input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px
       </td>
     </tr>
     {{end}}
-	    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:40px">暂无历史记录</td></tr>{{end}}
+    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--tx3);padding:48px 20px">
+      <div style="font-size:30px;margin-bottom:8px;opacity:.35">📋</div>
+      <div style="font-size:14px">暂无历史记录</div>
+    </td></tr>{{end}}
     </tbody>
   </table>
   </div>
 </div>
 
-</div>
+</div><!-- /wrap -->
 
 <script>
 (function(){
@@ -2258,20 +2481,85 @@ func handleSettings(panelPath string, cfg *Config) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bark 设置</title>
-<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;padding:0 16px}
-input{width:100%%;padding:10px;border:1px solid #e5e7eb;border-radius:8px;font-size:14px;box-sizing:border-box}
-button{margin-top:12px;padding:10px 20px;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px}
-a{color:#2563eb}label{font-size:13px;color:#6b7280}code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:12px}</style></head>
-<body><h2>⚙️ Bark 推送设置</h2>
-<p style="font-size:13px;color:#6b7280;margin-bottom:16px">只需填写 Bark Token，系统会自动拼接为 <code>https://api.day.app/你的token</code>；留空则关闭推送。</p>
-<form method="post">
-<label>Bark Token</label><br>
-<input name="bark_token" value="%s" placeholder="填你的 Bark token，例：AbCdEfGhXxXx" style="margin-top:6px">
-<br><button type="submit">保存</button>
-<a href="%s" style="margin-left:12px;font-size:13px">← 返回</a>
-</form>
-<p style="font-size:12px;color:#9ca3af;margin-top:20px">保存后立即生效，无需重启服务端。配置持久化到 /opt/bwtest/bark_url 文件。</p>
+<title>Bark 推送设置 — 带宽测试面板</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root{
+  --primary:#6366f1;--primary-dk:#4f46e5;--primary-glow:rgba(99,102,241,.15);
+  --ok:#10b981;--bg:#f8fafc;--surf:#fff;--surf2:#f1f5f9;--bdr:#e2e8f0;
+  --tx:#0f172a;--tx2:#475569;--tx3:#94a3b8;
+  --r-sm:8px;--r-lg:16px;--r-pill:9999px;
+  --sh:0 1px 3px rgba(0,0,0,.06),0 4px 8px rgba(0,0,0,.04);
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --primary:#818cf8;--primary-dk:#6366f1;--primary-glow:rgba(129,140,248,.15);
+    --bg:#060d1b;--surf:#0f172a;--surf2:#1a2236;--bdr:#1e293b;
+    --tx:#f1f5f9;--tx2:#94a3b8;--tx3:#475569;
+  }
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;
+  background:var(--bg);color:var(--tx);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.nav{position:sticky;top:0;z-index:100;height:60px;display:flex;align-items:center;gap:12px;
+  padding:0 24px;background:var(--surf);border-bottom:1px solid var(--bdr)}
+.nav-icon{width:34px;height:34px;background:linear-gradient(135deg,var(--primary),var(--primary-dk));
+  border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;
+  box-shadow:0 3px 10px var(--primary-glow);flex-shrink:0}
+.nav-title{font-weight:800;font-size:17px;letter-spacing:-.03em}
+.page{max-width:560px;margin:0 auto;padding:28px 24px 60px}
+.card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r-lg);
+  padding:28px;margin-bottom:20px;box-shadow:var(--sh)}
+.card-hd{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.card-hd-icon{width:30px;height:30px;border-radius:8px;background:var(--surf2);
+  display:flex;align-items:center;justify-content:center;font-size:14px}
+h2{font-size:16px;font-weight:700;color:var(--tx)}
+.desc{font-size:13px;color:var(--tx3);margin-bottom:24px;line-height:1.6}
+code{background:var(--surf2);padding:2px 7px;border-radius:5px;font-size:12px;
+  font-family:'SF Mono','Fira Code',monospace;border:1px solid var(--bdr)}
+.form-group{margin-bottom:18px}
+label{display:block;font-size:12px;font-weight:600;color:var(--tx2);margin-bottom:6px}
+input{width:100%%;padding:10px 12px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);
+  background:var(--surf);color:var(--tx);font-size:14px;font-family:inherit;
+  transition:border-color .15s,box-shadow .15s}
+input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-glow)}
+.actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px}
+button{display:inline-flex;align-items:center;gap:5px;padding:10px 18px;border:none;
+  border-radius:var(--r-sm);font-size:13px;font-weight:600;cursor:pointer;
+  background:var(--primary);color:#fff;font-family:inherit;
+  transition:filter .15s,transform .12s}
+button:hover{filter:brightness(1.08);transform:translateY(-1px)}
+button:active{transform:translateY(0);filter:brightness(.96)}
+a.back{font-size:13px;color:var(--tx2);text-decoration:none;display:inline-flex;align-items:center;gap:4px}
+a.back:hover{color:var(--primary)}
+.hint{font-size:12px;color:var(--tx3);margin-top:16px;padding-top:16px;border-top:1px solid var(--bdr)}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <div class="nav-icon">⚙️</div>
+  <span class="nav-title">推送设置</span>
+</nav>
+<div class="page">
+<div class="card">
+  <div class="card-hd">
+    <div class="card-hd-icon">🔔</div>
+    <h2>Bark 推送设置</h2>
+  </div>
+  <p class="desc">只需填写 Bark Token，系统会自动拼接为 <code>https://api.day.app/你的token</code>；留空则关闭推送。</p>
+  <form method="post">
+    <div class="form-group">
+      <label>Bark Token</label>
+      <input name="bark_token" value="%s" placeholder="例：AbCdEfGhXxXx" autocomplete="off">
+    </div>
+    <div class="actions">
+      <button type="submit">✓ 保存设置</button>
+      <a class="back" href="%s">← 返回面板</a>
+    </div>
+  </form>
+  <p class="hint">保存后立即生效，无需重启服务端。配置持久化到 /opt/bwtest/bark_url 文件。</p>
+</div>
+</div>
 </body></html>`, currentToken, panelPath)
 	}
 }
