@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -16,11 +18,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -124,6 +128,8 @@ type DataHello struct {
 	DurationSec int    `json:"duration_sec"`
 }
 
+// ── SSE Broker ────────────────────────────────────────────────────────────────
+
 type Broker struct {
 	mu   sync.Mutex
 	subs map[chan string]struct{}
@@ -158,6 +164,70 @@ func (b *Broker) Publish(msg string) {
 		}
 	}
 }
+
+// ── Rate Limiter ──────────────────────────────────────────────────────────────
+
+// ipRateLimiter implements a simple sliding-window per-IP rate limiter.
+type ipRateLimiter struct {
+	mu   sync.Mutex
+	hits map[string][]time.Time
+}
+
+func newIPRateLimiter() *ipRateLimiter {
+	rl := &ipRateLimiter{hits: make(map[string][]time.Time)}
+	go rl.cleanup()
+	return rl
+}
+
+// cleanup removes stale entries every 5 minutes to prevent unbounded growth.
+func (rl *ipRateLimiter) cleanup() {
+	tk := time.NewTicker(5 * time.Minute)
+	defer tk.Stop()
+	for range tk.C {
+		rl.mu.Lock()
+		cutoff := time.Now().Add(-time.Minute)
+		for ip, ts := range rl.hits {
+			var keep []time.Time
+			for _, t := range ts {
+				if t.After(cutoff) {
+					keep = append(keep, t)
+				}
+			}
+			if len(keep) == 0 {
+				delete(rl.hits, ip)
+			} else {
+				rl.hits[ip] = keep
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// Allow returns true if the IP has not exceeded maxPerMin requests in the last minute.
+func (rl *ipRateLimiter) Allow(ip string, maxPerMin int) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+	ts := rl.hits[ip]
+	var valid []time.Time
+	for _, t := range ts {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	if len(valid) >= maxPerMin {
+		rl.hits[ip] = valid
+		return false
+	}
+	rl.hits[ip] = append(valid, now)
+	return true
+}
+
+// registerLimiter is used to rate-limit client registration requests.
+var registerLimiter = newIPRateLimiter()
+
+// ── Bark Push Helpers ─────────────────────────────────────────────────────────
 
 func barkPush(barkURL, title, body string) {
 	if barkURL == "" {
@@ -228,6 +298,11 @@ func main() {
 		cfg.BarkURL = saved
 	}
 
+	// Warn if the default weak password is still in use.
+	if cfg.AdminPass == "admin123456" || cfg.AdminPass == "admin" {
+		log.Printf("⚠️  [SECURITY] 管理员密码使用了默认值 %q！请通过环境变量 ADMIN_PASS 设置强密码。", cfg.AdminPass)
+	}
+
 	db := mustInitDB(cfg.DBPath)
 	broker := NewBroker()
 
@@ -270,7 +345,29 @@ func main() {
 		})
 	}
 
-	log.Fatal(http.ListenAndServe(cfg.PanelAddr, mux))
+	srv := &http.Server{
+		Addr:    cfg.PanelAddr,
+		Handler: mux,
+	}
+
+	// Graceful shutdown: drain existing connections on SIGINT / SIGTERM.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		s := <-quit
+		log.Printf("received signal %v, shutting down gracefully (max 30s)...", s)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("graceful shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("panel listening on %s", cfg.PanelAddr)
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+	log.Printf("server shutdown complete")
 }
 
 func resetStuckTasks(db *sql.DB) {
@@ -309,6 +406,8 @@ func watchStuckTasks(db *sql.DB, broker *Broker) {
 		}
 	}
 }
+
+// ── Database / Schema ─────────────────────────────────────────────────────────
 
 func mustInitDB(path string) *sql.DB {
 	dir := filepath.Dir(path)
@@ -349,6 +448,10 @@ func mustInitDB(path string) *sql.DB {
 			logs TEXT NOT NULL DEFAULT ''
 		);`,
 		`ALTER TABLE tasks ADD COLUMN logs TEXT NOT NULL DEFAULT '';`,
+		// Indexes for common query patterns.
+		`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_client_id ON tasks(client_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_clients_approved ON clients(approved);`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -359,6 +462,8 @@ func mustInitDB(path string) *sql.DB {
 	}
 	return db
 }
+
+// ── Data Server (TCP) ─────────────────────────────────────────────────────────
 
 func runDataServer(cfg Config, db *sql.DB) {
 	ln, err := net.Listen("tcp", cfg.DataAddr)
@@ -494,8 +599,17 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 	return nil
 }
 
+// ── API Handlers (client-facing) ──────────────────────────────────────────────
+
 func handleRegister(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Rate-limit registration attempts: max 20 per IP per minute.
+		ip := realIP(r)
+		if !registerLimiter.Allow(ip, 20) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+
 		var req RegisterReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), 400)
@@ -929,6 +1043,8 @@ document.getElementById('restartBtn').addEventListener('click', function() {
 		)
 	}
 }
+
+// ── Admin Handlers (panel-facing) ─────────────────────────────────────────────
 
 func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -2236,15 +2352,30 @@ func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) 
 		durVal, _ := strconv.Atoi(r.Form.Get("duration_val"))
 		durUnit := r.Form.Get("duration_unit")
 		dur := durationToSec(durVal, durUnit)
-		if dur <= 0 {
-			dur = 60
+
+		// ── Input validation ──────────────────────────────────────────────────
+		const maxMbps = 100000 // 100 Gbps upper bound
+		const minDurSec = 5
+		const maxDurSec = 86400 * 30 // 30 days
+
+		if mode != "upload" && mode != "download" && mode != "both" {
+			http.Error(w, "invalid mode: must be upload, download, or both", http.StatusBadRequest)
+			return
 		}
-		if up < 0 {
-			up = 0
+		if up < 0 || up > maxMbps {
+			http.Error(w, fmt.Sprintf("up_mbps out of range [0, %d]", maxMbps), http.StatusBadRequest)
+			return
 		}
-		if down < 0 {
-			down = 0
+		if down < 0 || down > maxMbps {
+			http.Error(w, fmt.Sprintf("down_mbps out of range [0, %d]", maxMbps), http.StatusBadRequest)
+			return
 		}
+		if dur < minDurSec || dur > maxDurSec {
+			http.Error(w, fmt.Sprintf("duration out of range [%ds, %ds]", minDurSec, maxDurSec), http.StatusBadRequest)
+			return
+		}
+		// ──────────────────────────────────────────────────────────────────────
+
 		now := time.Now().Format(time.RFC3339)
 		
 		for _, clientID := range clientIDs {
@@ -2349,6 +2480,8 @@ func handleDeleteClient(panelPath string, db *sql.DB, broker *Broker) http.Handl
 	}
 }
 
+// ── Database Helpers ──────────────────────────────────────────────────────────
+
 func mustClients(db *sql.DB) []Client {
 	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version,latency FROM clients`)
 	if err != nil {
@@ -2389,6 +2522,8 @@ func taskStatus(db *sql.DB, taskID string) string {
 	return status
 }
 
+// ── HTTP Middleware ───────────────────────────────────────────────────────────
+
 func jsonHandler(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2399,7 +2534,10 @@ func jsonHandler(next http.HandlerFunc) http.HandlerFunc {
 func basicAuth(cfg Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
-		if !ok || u != cfg.AdminUser || p != cfg.AdminPass {
+		// Use constant-time comparison to prevent timing-based attacks.
+		if !ok ||
+			subtle.ConstantTimeCompare([]byte(u), []byte(cfg.AdminUser)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(p), []byte(cfg.AdminPass)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="bwpanel"`)
 			http.Error(w, "unauthorized", 401)
 			return
