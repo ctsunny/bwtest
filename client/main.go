@@ -391,13 +391,13 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 			status, err := taskControl(cfg, t.ID)
 			if err != nil {
 				failCount++
-				// 只有连续失败3次（约6-10秒）才认为任务被外部终止，增加对 transient API 错误的鲁棒性
-				if failCount >= 3 {
+				// 连续失败5次（约10秒）才认为任务被外部终止，增加对 transient API 错误的鲁棒性
+				if failCount >= 5 {
 					log.Printf("[task %s] control check error (consecutive %d): %v, stopping", t.ID, failCount, err)
 					atomic.StoreInt32(&stopFlag, 1)
 					return
 				}
-				log.Printf("[task %s] control check transient error: %v, retrying...", t.ID, err)
+				log.Printf("[task %s] control check transient error (%d/5): %v, retrying...", t.ID, failCount, err)
 				continue
 			}
 			failCount = 0

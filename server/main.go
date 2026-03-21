@@ -709,6 +709,13 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 						})
 						return
 					}
+					// 运行时长已超出 duration_sec，标记为 done 避免任务卡死在 running 状态
+					now := time.Now().Format(time.RFC3339)
+					if _, dbErr := db.Exec(`UPDATE tasks SET status='done', finished_at=? WHERE id=? AND status='running'`, now, currentTask); dbErr != nil {
+						log.Printf("handleNextTask: failed to mark expired task %s as done: %v", currentTask, dbErr)
+					} else {
+						broker.Publish("tasks")
+					}
 				}
 			}
 			// current_task 指向非 running 的旧任务或已超时，先清空脏数据
@@ -1622,12 +1629,21 @@ input:focus, select:focus, textarea:focus {
   <form id="taskForm" method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
-        <label class="note" style="display:flex; justify-content:space-between"><span>选择客户端（可多选）</span> <span id="selectAllBtn" style="font-size:11px;color:var(--primary);cursor:pointer">全选</span></label>
-        <select id="clientSelectBox" name="client_id" multiple required style="margin-top:4px; height:80px">
+        <label class="note" style="display:flex; justify-content:space-between; margin-bottom:4px">
+          <span>选择客户端</span>
+          <span style="display:flex;gap:10px">
+            <span id="selectAllBtn" style="font-size:11px;color:var(--primary);cursor:pointer">全选</span>
+            <span id="deselectAllBtn" style="font-size:11px;color:var(--tx3);cursor:pointer">全不选</span>
+          </span>
+        </label>
+        <div id="clientCheckboxList" style="max-height:120px;overflow-y:auto;border:1.5px solid var(--bdr);border-radius:var(--r-sm);padding:6px 10px;background:var(--surf);display:flex;flex-direction:column;gap:6px">
           {{range .ApprovedClients}}
-          <option value="{{.ID}}" {{if eq .ID $.DefaultClientID}}selected{{end}}>{{.Name}}</option>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400;color:var(--tx)">
+            <input type="checkbox" name="client_id" value="{{.ID}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">
+            {{.Name}}
+          </label>
           {{end}}
-        </select>
+        </div>
       </div>
       <div>
         <label class="note">模式</label>
@@ -1663,7 +1679,7 @@ input:focus, select:focus, textarea:focus {
       </div>
     </div>
   </form>
-  <div class="tip">提示：按住 Ctrl 或 Shift 点击客户端名称可批量多选下发任务。</div>
+  <div class="tip">提示：勾选客户端复选框可同时下发任务给多个客户端。</div>
   <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--bdr)">
     <span class="note" style="font-weight:700">⚡ 快速测速:</span>
     <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (10M)</button>
@@ -1892,7 +1908,10 @@ function buildRunningRow(t) {
     + '<td data-label="已传" class="up-col">' + fmtGB(t.upload_bytes) + '</td>'
     + '<td data-label="已拉" class="down-col">' + fmtGB(t.download_bytes) + '</td>'
     + '<td data-label="开始">' + fmtShortTime(t.started_at) + '</td>'
-    + '<td data-label="操作">' + stopBtn + '</td>'
+    + '<td data-label="操作"><div style="display:flex;gap:4px">'
+    + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
+    + stopBtn
+    + '</div></td>'
     + '</tr>';
 }
 
@@ -1910,9 +1929,11 @@ function buildHistoryRow(t) {
     + '<td data-label="已拉">' + fmtGB(t.download_bytes) + '</td>'
     + '<td data-label="开始">' + fmtShortTime(t.started_at) + '</td>'
     + '<td data-label="结束">' + fmtShortTime(t.finished_at) + '</td>'
-    + '<td data-label="操作">'
+    + '<td data-label="操作"><div style="display:flex;gap:4px;flex-wrap:wrap">'
+    + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
     + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
-    + '</td>'
+    + '<button type="button" class="sec clone-btn" data-id="'+t.id+'" data-client="'+t.client_id+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'">🔄 克隆</button>'
+    + '</div></td>'
     + '</tr>';
 }
 
@@ -2191,11 +2212,9 @@ delegate('clientBody', 'del-client-btn', function(target) {
 });
 
 delegate('historyTaskBody', 'clone-btn', function(target) {
-    var box = document.getElementById('clientSelectBox');
-    if (!box) return;
-    for(var i=0; i<box.options.length; i++) {
-        box.options[i].selected = (box.options[i].value === target.dataset.client);
-    }
+    document.querySelectorAll('#clientCheckboxList input[type="checkbox"]').forEach(function(cb) {
+        cb.checked = (cb.value === target.dataset.client);
+    });
     document.querySelector('select[name="mode"]').value = target.dataset.mode;
     document.querySelector('input[name="up_mbps"]').value = target.dataset.up;
     document.querySelector('input[name="down_mbps"]').value = target.dataset.down;
@@ -2282,6 +2301,8 @@ if (toggleHistoryBtnEl) toggleHistoryBtnEl.addEventListener('click', function() 
 var taskForm = document.getElementById('taskForm');
 if (taskForm) taskForm.addEventListener('submit', function(e) {
   e.preventDefault();
+  var checked = document.querySelectorAll('#clientCheckboxList input[type="checkbox"]:checked');
+  if (checked.length === 0) { alert('请先勾选至少一个客户端'); return; }
   var fd = new FormData(taskForm);
   var body = new URLSearchParams(fd).toString();
   var btn = document.getElementById('createTaskBtn');
@@ -2294,17 +2315,17 @@ if (taskForm) taskForm.addEventListener('submit', function(e) {
 
 var sab = document.getElementById('selectAllBtn');
 if (sab) sab.addEventListener('click', function() {
-  var s = document.getElementById('clientSelectBox');
-  if (!s) return;
-  for(var i=0; i<s.options.length; i++){ s.options[i].selected = true; }
+  document.querySelectorAll('#clientCheckboxList input[type="checkbox"]').forEach(function(cb) { cb.checked = true; });
+});
+var dsab = document.getElementById('deselectAllBtn');
+if (dsab) dsab.addEventListener('click', function() {
+  document.querySelectorAll('#clientCheckboxList input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
 });
 
 document.querySelectorAll('.flash-test-btn').forEach(function(b) {
   b.addEventListener('click', function() {
-    var box = document.getElementById('clientSelectBox');
-    var selected = false;
-    for(var i=0; i<box.options.length; i++) { if(box.options[i].selected) selected = true; }
-    if(!selected) { alert('请先在上方选择客户端'); return; }
+    var checked = document.querySelectorAll('#clientCheckboxList input[type="checkbox"]:checked');
+    if (checked.length === 0) { alert('请先在上方勾选客户端'); return; }
     document.querySelector('select[name="mode"]').value = b.dataset.mode;
     document.querySelector('input[name="up_mbps"]').value = '10';
     document.querySelector('input[name="down_mbps"]').value = '10';
