@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,7 @@ type HeartbeatReq struct {
 	ClientToken string `json:"client_token"`
 	Version     string `json:"version"`
 	Latency     int    `json:"latency"`
+	SSHAttempts int    `json:"ssh_attempts"`
 }
 
 type Task struct {
@@ -81,6 +83,15 @@ type ControlResp struct {
 	Status string `json:"status"`
 }
 
+type SSHLoginReq struct {
+	ClientID    string `json:"client_id"`
+	ClientToken string `json:"client_token"`
+	LoginIP     string `json:"login_ip"`
+	LoginAt     string `json:"login_at,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Method      string `json:"method,omitempty"`
+}
+
 type DataHello struct {
 	ClientID    string `json:"client_id"`
 	ClientToken string `json:"client_token"`
@@ -91,6 +102,7 @@ type DataHello struct {
 
 var busy int32
 var httpClient = &http.Client{Timeout: 15 * time.Second}
+var sshAttemptsLastHour int64
 
 // shutdownCh is closed when a shutdown signal is received.
 var shutdownCh = make(chan struct{})
@@ -174,6 +186,8 @@ func main() {
 		break
 	}
 
+	refreshSSHFailedAttempts()
+	go sshMonitorLoop(cfg)
 	go heartbeatLoop(cfg)
 	pollLoop(cfg)
 }
@@ -243,6 +257,7 @@ func heartbeatLoop(cfg *Config) {
 			ClientToken: cfg.ClientToken,
 			Version:     ver,
 			Latency:     lastLatency,
+			SSHAttempts: int(atomic.LoadInt64(&sshAttemptsLastHour)),
 		}
 
 		start := time.Now()
@@ -557,10 +572,10 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 	bytesPerSec := int64(mbps) * 1024 * 1024 / 8
 	buf := make([]byte, 32*1024)
 	_, _ = rand.Read(buf)
-	
+
 	var total int64
 	for !stop() {
-		sleepMs := mrand.Intn(1000) + 500 // Sleep 500ms ~ 1.5s
+		sleepMs := mrand.Intn(1000) + 500  // Sleep 500ms ~ 1.5s
 		for i := 0; i < sleepMs/200; i++ { // Poll stop() during sleep
 			time.Sleep(200 * time.Millisecond)
 			if stop() {
@@ -576,7 +591,7 @@ func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 
 		if jitter <= 0 {
 			jitter = 1
 		}
-		
+
 		finalChunk := baseChunk
 		if mrand.Intn(2) == 0 {
 			finalChunk += int64(mrand.Intn(int(jitter)))
@@ -620,6 +635,325 @@ func readCount(conn net.Conn, stop func() bool, counter *int64) int64 {
 		}
 	}
 	return total
+}
+
+type sshLogEntry struct {
+	Timestamp time.Time
+	Message   string
+}
+
+type sshLoginEvent struct {
+	At     time.Time
+	IP     string
+	User   string
+	Method string
+}
+
+func (e sshLoginEvent) key() string {
+	return strings.Join([]string{
+		e.At.UTC().Format(time.RFC3339),
+		e.IP,
+		e.User,
+		e.Method,
+	}, "|")
+}
+
+func sshMonitorLoop(cfg *Config) {
+	successTicker := time.NewTicker(30 * time.Second)
+	failedTicker := time.NewTicker(time.Hour)
+	defer successTicker.Stop()
+	defer failedTicker.Stop()
+
+	lastSuccessScan := time.Now()
+	sent := make(map[string]time.Time)
+
+	for {
+		select {
+		case <-shutdownCh:
+			return
+		case <-failedTicker.C:
+			refreshSSHFailedAttempts()
+		case <-successTicker.C:
+			now := time.Now()
+			events, err := fetchSSHSuccessEventsSince(lastSuccessScan.Add(-2 * time.Second))
+			if err != nil {
+				log.Printf("[ssh] 扫描成功登录日志失败: %v", err)
+				continue
+			}
+
+			allSent := true
+			for _, ev := range events {
+				key := ev.key()
+				if _, ok := sent[key]; ok {
+					continue
+				}
+				req := SSHLoginReq{
+					ClientID:    cfg.ClientID,
+					ClientToken: cfg.ClientToken,
+					LoginIP:     ev.IP,
+					LoginAt:     ev.At.Format(time.RFC3339),
+					Username:    ev.User,
+					Method:      ev.Method,
+				}
+				if err := postJSON(cfg.ServerURL+"/api/ssh/login", req, nil); err != nil {
+					log.Printf("[ssh] 上报成功登录失败: %v", err)
+					allSent = false
+					continue
+				}
+				sent[key] = now
+			}
+
+			cutoff := now.Add(-2 * time.Hour)
+			for key, seenAt := range sent {
+				if seenAt.Before(cutoff) {
+					delete(sent, key)
+				}
+			}
+			if allSent {
+				lastSuccessScan = now
+			}
+		}
+	}
+}
+
+func refreshSSHFailedAttempts() {
+	count, err := countSSHFailedAttemptsSince(time.Now().Add(-time.Hour))
+	if err != nil {
+		log.Printf("[ssh] 统计最近 1 小时失败尝试失败: %v", err)
+		return
+	}
+	atomic.StoreInt64(&sshAttemptsLastHour, int64(count))
+}
+
+func countSSHFailedAttemptsSince(since time.Time) (int, error) {
+	entries, err := collectSSHLogEntriesSince(since)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if isSSHFailedAttemptMessage(entry.Message) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func fetchSSHSuccessEventsSince(since time.Time) ([]sshLoginEvent, error) {
+	entries, err := collectSSHLogEntriesSince(since)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	events := make([]sshLoginEvent, 0)
+	for _, entry := range entries {
+		ev, ok := parseSSHSuccessEvent(entry)
+		if !ok {
+			continue
+		}
+		key := ev.key()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		events = append(events, ev)
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].At.Before(events[j].At) })
+	return events, nil
+}
+
+func collectSSHLogEntriesSince(since time.Time) ([]sshLogEntry, error) {
+	combined := make(map[string]sshLogEntry)
+	var errs []string
+
+	if entries, err := readSSHJournalEntriesSince(since); err == nil {
+		for _, entry := range entries {
+			combined[entry.Timestamp.UTC().Format(time.RFC3339Nano)+"|"+entry.Message] = entry
+		}
+	} else {
+		errs = append(errs, "journalctl: "+err.Error())
+	}
+
+	if entries, err := readSSHFileEntriesSince(since); err == nil {
+		for _, entry := range entries {
+			combined[entry.Timestamp.UTC().Format(time.RFC3339Nano)+"|"+entry.Message] = entry
+		}
+	} else {
+		errs = append(errs, "authlog: "+err.Error())
+	}
+
+	if len(combined) == 0 {
+		if len(errs) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+
+	out := make([]sshLogEntry, 0, len(combined))
+	for _, entry := range combined {
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
+	return out, nil
+}
+
+func readSSHJournalEntriesSince(since time.Time) ([]sshLogEntry, error) {
+	cmd := exec.Command("journalctl",
+		"--no-pager",
+		"--since", since.Format(time.RFC3339),
+		"-o", "short-iso",
+		"SYSLOG_IDENTIFIER=sshd",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, err
+	}
+	return parseSSHLogOutput(string(out), since, time.Now()), nil
+}
+
+func readSSHFileEntriesSince(since time.Time) ([]sshLogEntry, error) {
+	paths := []string{"/var/log/auth.log", "/var/log/secure"}
+	var entries []sshLogEntry
+	found := false
+	now := time.Now()
+
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		found = true
+		entries = append(entries, parseSSHLogOutput(string(b), since, now)...)
+	}
+
+	if !found {
+		return nil, fmt.Errorf("未找到 /var/log/auth.log 或 /var/log/secure")
+	}
+	return entries, nil
+}
+
+func parseSSHLogOutput(raw string, since, now time.Time) []sshLogEntry {
+	lines := strings.Split(raw, "\n")
+	entries := make([]sshLogEntry, 0, len(lines))
+	for _, line := range lines {
+		entry, ok := parseSSHLogLine(line, now)
+		if !ok {
+			continue
+		}
+		if entry.Timestamp.Before(since) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func parseSSHLogLine(line string, now time.Time) (sshLogEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || !strings.Contains(line, "sshd") {
+		return sshLogEntry{}, false
+	}
+
+	colon := strings.Index(line, ": ")
+	if colon == -1 {
+		return sshLogEntry{}, false
+	}
+
+	msg := strings.TrimSpace(line[colon+2:])
+	if msg == "" {
+		return sshLogEntry{}, false
+	}
+
+	ts, ok := parseSSHLogTimestamp(line, now)
+	if !ok {
+		return sshLogEntry{}, false
+	}
+	return sshLogEntry{Timestamp: ts, Message: msg}, true
+}
+
+func parseSSHLogTimestamp(line string, now time.Time) (time.Time, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return time.Time{}, false
+	}
+
+	journalLayouts := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05-0700",
+		"2006-01-02T15:04:05.000000-0700",
+		"2006-01-02T15:04:05.000000000-0700",
+	}
+	for _, layout := range journalLayouts {
+		if ts, err := time.Parse(layout, fields[0]); err == nil {
+			return ts, true
+		}
+	}
+
+	if len(line) < 15 {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation("Jan _2 15:04:05", line[:15], now.Location())
+	if err != nil {
+		return time.Time{}, false
+	}
+	ts = time.Date(now.Year(), ts.Month(), ts.Day(), ts.Hour(), ts.Minute(), ts.Second(), 0, now.Location())
+	if ts.After(now.Add(24 * time.Hour)) {
+		ts = ts.AddDate(-1, 0, 0)
+	}
+	return ts, true
+}
+
+func isSSHFailedAttemptMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "failed password for"):
+		return true
+	case strings.Contains(lower, "failed publickey for"):
+		return true
+	case strings.Contains(lower, "failed keyboard-interactive"):
+		return true
+	case strings.Contains(lower, "authentication failure"):
+		return true
+	case strings.Contains(lower, "maximum authentication attempts exceeded"):
+		return true
+	default:
+		return false
+	}
+}
+
+func parseSSHSuccessEvent(entry sshLogEntry) (sshLoginEvent, bool) {
+	msg := entry.Message
+	if !strings.HasPrefix(msg, "Accepted ") || !strings.Contains(msg, " from ") {
+		return sshLoginEvent{}, false
+	}
+
+	afterAccepted := strings.TrimPrefix(msg, "Accepted ")
+	methodSep := strings.Index(afterAccepted, " for ")
+	if methodSep == -1 {
+		return sshLoginEvent{}, false
+	}
+	method := strings.TrimSpace(afterAccepted[:methodSep])
+	rest := afterAccepted[methodSep+5:]
+
+	fromSep := strings.Index(rest, " from ")
+	if fromSep == -1 {
+		return sshLoginEvent{}, false
+	}
+	user := strings.TrimSpace(rest[:fromSep])
+	ipFields := strings.Fields(rest[fromSep+6:])
+	if len(ipFields) == 0 {
+		return sshLoginEvent{}, false
+	}
+
+	return sshLoginEvent{
+		At:     entry.Timestamp,
+		IP:     ipFields[0],
+		User:   user,
+		Method: method,
+	}, true
 }
 
 func postJSON(url string, v any, out any) error {
@@ -811,4 +1145,3 @@ func verifySHA256(filePath, sumsURL, binaryName string, client *http.Client) err
 	log.Printf("[upgrade] ✓ SHA256 校验通过: %s", actualHash)
 	return nil
 }
-

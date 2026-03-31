@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -64,6 +67,7 @@ func TestBarkURLFromToken(t *testing.T) {
 		{"", ""},
 		{"abc123", "https://api.day.app/abc123"},
 		{"https://api.day.app/abc123", "https://api.day.app/abc123"},
+		{"https://api.day.app/abc123/这里改成你自己的推送内容", "https://api.day.app/abc123"},
 		{"https://custom.server.com/abc", "https://custom.server.com/abc"},
 		{"http://custom.server.com/abc", "http://custom.server.com/abc"},
 		{"abc123/", "https://api.day.app/abc123"}, // trailing slash stripped
@@ -83,6 +87,7 @@ func TestBarkTokenFromURL(t *testing.T) {
 	}{
 		{"", ""},
 		{"https://api.day.app/abc123", "abc123"},
+		{"https://api.day.app/abc123/这里改成你自己的推送内容", "abc123"},
 		{"http://api.day.app/abc123", "abc123"},
 		{"https://custom.server.com/tok", "https://custom.server.com/tok"},
 		{"abc123", "abc123"},
@@ -91,6 +96,24 @@ func TestBarkTokenFromURL(t *testing.T) {
 		got := barkTokenFromURL(tc.raw)
 		if got != tc.want {
 			t.Errorf("barkTokenFromURL(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeBarkURL(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"https://api.day.app/5ksYnDVKmfTvQogt7Xk67N/这里改成你自己的推送内容", "https://api.day.app/5ksYnDVKmfTvQogt7Xk67N"},
+		{"https://api.day.app/5ksYnDVKmfTvQogt7Xk67N/group?icon=test", "https://api.day.app/5ksYnDVKmfTvQogt7Xk67N"},
+		{"https://custom.server.com/key/path", "https://custom.server.com/key/path"},
+		{"abc123", "abc123"},
+	}
+	for _, tc := range tests {
+		got := normalizeBarkURL(tc.raw)
+		if got != tc.want {
+			t.Errorf("normalizeBarkURL(%q) = %q, want %q", tc.raw, got, tc.want)
 		}
 	}
 }
@@ -166,10 +189,10 @@ func TestCreateTaskValidation(t *testing.T) {
 	const maxDurSec = 86400 * 30
 
 	tests := []struct {
-		mode       string
-		up         int
-		down       int
-		dur        int
+		mode        string
+		up          int
+		down        int
+		dur         int
 		wantInvalid bool
 	}{
 		{"upload", 100, 0, 60, false},
@@ -199,5 +222,67 @@ func TestCreateTaskValidation(t *testing.T) {
 			t.Errorf("mode=%q up=%d down=%d dur=%d: invalid=%v, want %v",
 				tc.mode, tc.up, tc.down, tc.dur, invalid, tc.wantInvalid)
 		}
+	}
+}
+
+func TestHandleHeartbeatUpdatesSSHAttempts(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	_, err := db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version,ssh_attempts) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"c1", "node-1", "", "secret", 1, time.Now().Format(time.RFC3339), "127.0.0.1", "", "v1", 0)
+	if err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+
+	reqBody, _ := json.Marshal(HeartbeatReq{
+		ClientID:    "c1",
+		ClientToken: "secret",
+		Version:     "v2",
+		Latency:     42,
+		SSHAttempts: 9,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/heartbeat", bytes.NewReader(reqBody))
+	req.RemoteAddr = "198.51.100.10:12345"
+	w := httptest.NewRecorder()
+
+	handleHeartbeat(db).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleHeartbeat status = %d, want 200", w.Code)
+	}
+
+	var gotAttempts int
+	if err := db.QueryRow(`SELECT ssh_attempts FROM clients WHERE id=?`, "c1").Scan(&gotAttempts); err != nil {
+		t.Fatalf("query ssh_attempts: %v", err)
+	}
+	if gotAttempts != 9 {
+		t.Fatalf("ssh_attempts = %d, want 9", gotAttempts)
+	}
+}
+
+func TestHandleSSHLoginAuthorized(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	_, err := db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c1", "node-1", "", "secret", 1, time.Now().Format(time.RFC3339), "127.0.0.1", "", "v1")
+	if err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+
+	reqBody, _ := json.Marshal(SSHLoginReq{
+		ClientID:    "c1",
+		ClientToken: "secret",
+		LoginIP:     "203.0.113.5",
+		LoginAt:     "2026-03-31T16:00:00Z",
+		Username:    "root",
+		Method:      "publickey",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/ssh/login", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+
+	handleSSHLogin(Config{}, db).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleSSHLogin status = %d, want 200", w.Code)
 	}
 }

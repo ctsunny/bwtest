@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ── token ─────────────────────────────────────────────────────────────────────
@@ -158,5 +159,54 @@ func TestVerifySHA256BinaryNotInSUMS(t *testing.T) {
 	err = verifySHA256(tmp.Name(), srv.URL+"/SHA256SUMS", "bwagent-linux-amd64", srv.Client())
 	if err == nil {
 		t.Error("verifySHA256 should return error when binary not found in SHA256SUMS")
+	}
+}
+
+func TestParseSSHSuccessEvent(t *testing.T) {
+	entry := sshLogEntry{
+		Timestamp: time.Date(2026, 3, 31, 16, 0, 0, 0, time.UTC),
+		Message:   "Accepted publickey for root from 203.0.113.8 port 51234 ssh2: RSA SHA256:test",
+	}
+
+	ev, ok := parseSSHSuccessEvent(entry)
+	if !ok {
+		t.Fatal("parseSSHSuccessEvent should parse accepted login lines")
+	}
+	if ev.IP != "203.0.113.8" {
+		t.Fatalf("expected IP 203.0.113.8, got %q", ev.IP)
+	}
+	if ev.User != "root" {
+		t.Fatalf("expected user root, got %q", ev.User)
+	}
+	if ev.Method != "publickey" {
+		t.Fatalf("expected method publickey, got %q", ev.Method)
+	}
+}
+
+func TestIsSSHFailedAttemptMessage(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want bool
+	}{
+		{"Failed password for invalid user test from 198.51.100.7 port 55222 ssh2", true},
+		{"error: maximum authentication attempts exceeded for root from 198.51.100.7 port 55222 ssh2 [preauth]", true},
+		{"Accepted password for root from 198.51.100.7 port 55222 ssh2", false},
+	}
+
+	for _, tc := range tests {
+		if got := isSSHFailedAttemptMessage(tc.msg); got != tc.want {
+			t.Fatalf("isSSHFailedAttemptMessage(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
+}
+
+func TestParseSSHLogTimestampSyslog(t *testing.T) {
+	now := time.Date(2026, 3, 31, 16, 0, 0, 0, time.Local)
+	ts, ok := parseSSHLogTimestamp("Mar 31 15:59:59 host sshd[1234]: Failed password for root from 198.51.100.2 port 22 ssh2", now)
+	if !ok {
+		t.Fatal("expected syslog timestamp to parse")
+	}
+	if ts.Year() != 2026 || ts.Month() != time.March || ts.Day() != 31 {
+		t.Fatalf("unexpected parsed timestamp: %v", ts)
 	}
 }
