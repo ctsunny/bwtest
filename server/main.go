@@ -244,7 +244,10 @@ func barkPush(barkURL, title, body string) {
 	if barkURL == "" {
 		return
 	}
-	base := strings.TrimRight(barkURL, "/")
+	base := normalizeBarkURL(barkURL)
+	if base == "" {
+		return
+	}
 	pushURL := fmt.Sprintf("%s/%s/%s", base, url.PathEscape(title), url.PathEscape(body))
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(pushURL)
@@ -253,6 +256,10 @@ func barkPush(barkURL, title, body string) {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		log.Printf("bark push error: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
 }
 
 func loadBarkURL(path string) string {
@@ -270,14 +277,13 @@ func barkURLFromToken(token string) string {
 		return ""
 	}
 	if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") {
-		return strings.TrimRight(token, "/")
+		return normalizeBarkURL(token)
 	}
 	return "https://api.day.app/" + token
 }
 
 func barkTokenFromURL(raw string) string {
-	raw = strings.TrimSpace(raw)
-	raw = strings.TrimRight(raw, "/")
+	raw = normalizeBarkURL(raw)
 	if raw == "" {
 		return ""
 	}
@@ -288,6 +294,30 @@ func barkTokenFromURL(raw string) string {
 		return strings.TrimPrefix(raw, "http://api.day.app/")
 	}
 	return raw
+}
+
+func normalizeBarkURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, "/")
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	if !strings.EqualFold(u.Host, "api.day.app") {
+		return strings.TrimRight(raw, "/")
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return raw
+	}
+	u.Path = "/" + parts[0]
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 func main() {
@@ -306,8 +336,9 @@ func main() {
 		cfg.PanelPath = "/admin"
 	}
 	if saved := loadBarkURL("/opt/bwtest/bark_url"); saved != "" {
-		cfg.BarkURL = saved
+		cfg.BarkURL = normalizeBarkURL(saved)
 	}
+	cfg.BarkURL = normalizeBarkURL(cfg.BarkURL)
 
 	// Warn if the default weak password is still in use.
 	if cfg.AdminPass == "admin123456" || cfg.AdminPass == "admin" {

@@ -67,6 +67,7 @@ func TestBarkURLFromToken(t *testing.T) {
 		{"", ""},
 		{"abc123", "https://api.day.app/abc123"},
 		{"https://api.day.app/abc123", "https://api.day.app/abc123"},
+		{"https://api.day.app/abc123/这里改成你自己的推送内容", "https://api.day.app/abc123"},
 		{"https://custom.server.com/abc", "https://custom.server.com/abc"},
 		{"http://custom.server.com/abc", "http://custom.server.com/abc"},
 		{"abc123/", "https://api.day.app/abc123"}, // trailing slash stripped
@@ -86,6 +87,7 @@ func TestBarkTokenFromURL(t *testing.T) {
 	}{
 		{"", ""},
 		{"https://api.day.app/abc123", "abc123"},
+		{"https://api.day.app/abc123/这里改成你自己的推送内容", "abc123"},
 		{"http://api.day.app/abc123", "abc123"},
 		{"https://custom.server.com/tok", "https://custom.server.com/tok"},
 		{"abc123", "abc123"},
@@ -94,6 +96,24 @@ func TestBarkTokenFromURL(t *testing.T) {
 		got := barkTokenFromURL(tc.raw)
 		if got != tc.want {
 			t.Errorf("barkTokenFromURL(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeBarkURL(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"https://api.day.app/5ksYnDVKmfTvQogt7Xk67N/这里改成你自己的推送内容", "https://api.day.app/5ksYnDVKmfTvQogt7Xk67N"},
+		{"https://api.day.app/5ksYnDVKmfTvQogt7Xk67N/group?icon=test", "https://api.day.app/5ksYnDVKmfTvQogt7Xk67N"},
+		{"https://custom.server.com/key/path", "https://custom.server.com/key/path"},
+		{"abc123", "abc123"},
+	}
+	for _, tc := range tests {
+		got := normalizeBarkURL(tc.raw)
+		if got != tc.want {
+			t.Errorf("normalizeBarkURL(%q) = %q, want %q", tc.raw, got, tc.want)
 		}
 	}
 }
