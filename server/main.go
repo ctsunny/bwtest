@@ -55,6 +55,7 @@ type Client struct {
 	UpgradeTo   string
 	Version     string
 	Latency     int
+	SSHAttempts int
 }
 
 type Task struct {
@@ -86,6 +87,7 @@ type HeartbeatReq struct {
 	ClientToken string `json:"client_token"`
 	Version     string `json:"version"`
 	Latency     int    `json:"latency"`
+	SSHAttempts int    `json:"ssh_attempts"`
 }
 
 type ResultReq struct {
@@ -118,6 +120,15 @@ type AssignResp struct {
 
 type ControlResp struct {
 	Status string `json:"status"`
+}
+
+type SSHLoginReq struct {
+	ClientID    string `json:"client_id"`
+	ClientToken string `json:"client_token"`
+	LoginIP     string `json:"login_ip"`
+	LoginAt     string `json:"login_at,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Method      string `json:"method,omitempty"`
 }
 
 type DataHello struct {
@@ -316,6 +327,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", jsonHandler(handleRegister(cfg, db, broker)))
 	mux.HandleFunc("/api/heartbeat", jsonHandler(handleHeartbeat(db)))
+	mux.HandleFunc("/api/ssh/login", jsonHandler(handleSSHLogin(cfg, db)))
 	mux.HandleFunc("/api/task/next", jsonHandler(handleNextTask(cfg, db, broker)))
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
@@ -432,6 +444,7 @@ func mustInitDB(path string) *sql.DB {
 		`ALTER TABLE clients ADD COLUMN upgrade_to TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE clients ADD COLUMN version TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE clients ADD COLUMN latency INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE clients ADD COLUMN ssh_attempts INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
@@ -482,7 +495,7 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	br := bufio.NewReader(conn)
-	
+
 	var line []byte
 	var err error
 	for i := 0; i < 20; i++ { // Limit to 20 lines to prevent DoS
@@ -497,7 +510,7 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 	if len(line) == 0 || line[0] != '{' {
 		return // JSON not found
 	}
-	
+
 	var hello DataHello
 	if err := json.Unmarshal(line, &hello); err != nil {
 		return
@@ -557,7 +570,7 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 	bytesPerSec := int64(mbps) * 1024 * 1024 / 8
 	buf := make([]byte, 32*1024)
 	_, _ = rand.Read(buf)
-	
+
 	// Fake HTTP Response Header for Obfuscation
 	httpHeader := []byte("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nServer: nginx/1.24.0\r\nConnection: keep-alive\r\n\r\n")
 	_, _ = w.Write(httpHeader)
@@ -576,7 +589,7 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 		if jitter <= 0 {
 			jitter = 1
 		}
-		
+
 		finalChunk := baseChunk
 		if mrand.Intn(2) == 0 {
 			finalChunk += int64(mrand.Intn(int(jitter)))
@@ -669,9 +682,45 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 		if upgradeTo != "" {
 			_, _ = db.Exec(`UPDATE clients SET upgrade_to='' WHERE id=?`, req.ClientID)
 		}
-		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, version=?, latency=? WHERE id=?`,
-			time.Now().Format(time.RFC3339), realIP(r), req.Version, req.Latency, req.ClientID)
+		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, version=?, latency=?, ssh_attempts=? WHERE id=?`,
+			time.Now().Format(time.RFC3339), realIP(r), req.Version, req.Latency, req.SSHAttempts, req.ClientID)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upgrade_to": upgradeTo})
+	}
+}
+
+func handleSSHLogin(cfg Config, db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req SSHLoginReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		loginIP := strings.TrimSpace(req.LoginIP)
+		if loginIP == "" || len(loginIP) > 128 {
+			http.Error(w, "bad login ip", http.StatusBadRequest)
+			return
+		}
+
+		var token, clientName string
+		if err := db.QueryRow(`SELECT token, name FROM clients WHERE id=?`, req.ClientID).Scan(&token, &clientName); err != nil || token != req.ClientToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		body := fmt.Sprintf("客户端 %s 检测到 SSH 登录成功\n登录 IP: %s", clientName, loginIP)
+		if user := strings.TrimSpace(req.Username); user != "" {
+			body += "\n用户: " + user
+		}
+		if method := strings.TrimSpace(req.Method); method != "" {
+			body += "\n方式: " + method
+		}
+		if loginAt := strings.TrimSpace(req.LoginAt); loginAt != "" {
+			body += "\n时间: " + loginAt
+		}
+		go barkPush(cfg.BarkURL, "SSH 登录提醒", body)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}
 }
 
@@ -863,6 +912,7 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			RemoteIP    string `json:"remote_ip"`
 			CurrentTask string `json:"current_task"`
 			Latency     int    `json:"latency"`
+			SSHAttempts int    `json:"ssh_attempts"`
 		}
 		type taskJSON struct {
 			ID            string  `json:"id"`
@@ -890,7 +940,7 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				ID: c.ID, Name: c.Name, Remark: c.Remark,
 				Approved: c.Approved, LastSeen: c.LastSeen,
 				RemoteIP: c.RemoteIP, CurrentTask: c.CurrentTask,
-				Latency: c.Latency,
+				Latency: c.Latency, SSHAttempts: c.SSHAttempts,
 			})
 		}
 		tj := make([]taskJSON, 0, len(tasks))
@@ -1589,16 +1639,17 @@ input:focus, select:focus, textarea:focus {
   <table>
     <thead><tr>
       <th>名称</th><th>版本</th><th>备注</th><th>批准</th>
-      <th>延迟</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
+      <th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
     </tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
-    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-ssh-attempts="{{.SSHAttempts}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
       <td data-label="名称"><strong style="font-weight:600">{{.Name}}</strong></td>
       <td data-label="版本"><code style="font-size:11px;background:var(--surf2);padding:2px 7px;border-radius:5px;border:1px solid var(--bdr);font-family:monospace">{{.Version}}</code></td>
       <td data-label="备注" style="color:var(--tx2)">{{.Remark}}</td>
       <td data-label="批准">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
       <td data-label="延迟" class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
+      <td data-label="SSH尝试" class="sshattempt-col">{{.SSHAttempts}}</td>
       <td data-label="心跳" class="lastseen-col" style="color:var(--tx3);font-size:12px">{{.LastSeen | shortTime}}</td>
       <td data-label="IP" style="font-family:monospace;font-size:12px;color:var(--tx2)">{{.RemoteIP}}</td>
       <td data-label="任务" class="curtask-col" style="font-family:monospace;font-size:11px;color:var(--tx3)">{{.CurrentTask}}</td>
@@ -2046,6 +2097,11 @@ function pollData() {
         }
         if (c.latency !== undefined) {
           row.dataset.latency = c.latency;
+        }
+        if (c.ssh_attempts !== undefined) {
+          row.dataset.sshAttempts = c.ssh_attempts;
+          var sshCell = row.querySelector('.sshattempt-col');
+          if (sshCell) sshCell.textContent = c.ssh_attempts;
         }
         var ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
@@ -2686,7 +2742,7 @@ func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) 
 		// ──────────────────────────────────────────────────────────────────────
 
 		now := time.Now().Format(time.RFC3339)
-		
+
 		for _, clientID := range clientIDs {
 			id := genToken(8)
 			_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at) VALUES(?,?,?,?,?,?,?,?)`,
@@ -2759,7 +2815,7 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 		}
 		_ = r.ParseForm()
 		clientID := r.Form.Get("client_id")
-		version  := strings.TrimSpace(r.Form.Get("version"))
+		version := strings.TrimSpace(r.Form.Get("version"))
 		if version == "" {
 			version = getenv("BWPANEL_VERSION", Version)
 		}
@@ -2792,7 +2848,7 @@ func handleDeleteClient(panelPath string, db *sql.DB, broker *Broker) http.Handl
 // ── Database Helpers ──────────────────────────────────────────────────────────
 
 func mustClients(db *sql.DB) []Client {
-	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version,latency FROM clients`)
+	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version,latency,ssh_attempts FROM clients`)
 	if err != nil {
 		return nil
 	}
@@ -2801,7 +2857,7 @@ func mustClients(db *sql.DB) []Client {
 	for rows.Next() {
 		var c Client
 		var approved int
-		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version, &c.Latency)
+		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version, &c.Latency, &c.SSHAttempts)
 		c.Approved = approved == 1
 		out = append(out, c)
 	}

@@ -10,6 +10,8 @@ A lightweight Linux bandwidth test panel and agent.
 - Configurable speed (Mbps) and duration (seconds)
 - SQLite persistence (no external DB required)
 - SSE live refresh in the panel
+- Client reports SSH failed-login attempts from the last hour
+- Bark notifications for new clients, tasks, and successful SSH logins
 - Linux amd64 / arm64 release binaries via GitHub Actions
 
 ## Install server
