@@ -1679,7 +1679,7 @@ input:focus, select:focus, textarea:focus {
     <tbody id="clientBody">
     {{range .Clients}}
     <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-ssh-attempts="{{.SSHAttempts}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
-      <td data-label="选择" class="select-col">{{if .Approved}}<input type="checkbox" class="task-client-checkbox" value="{{.ID}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">{{else}}-{{end}}</td>
+      <td data-label="选择" class="select-col">{{if .Approved}}<input type="checkbox" class="task-client-checkbox" value="{{.ID}}" aria-label="选择客户端 {{.Name}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">{{else}}-{{end}}</td>
       <td data-label="名称" class="name-col"><strong style="font-weight:600">{{.Name}}</strong></td>
       <td data-label="版本"><code style="font-size:11px;background:var(--surf2);padding:2px 7px;border-radius:5px;border:1px solid var(--bdr);font-family:monospace">{{.Version}}</code></td>
       <td data-label="备注" class="remark-col" style="color:var(--tx2)">{{.Remark}}</td>
@@ -1855,6 +1855,8 @@ var PANEL_PATH = {{.PanelPathJS}};
 var INIT_TOKEN  = {{.InitTokenJS}};
 var PANEL_ADDR  = location.host;
 var VERSION     = {{.VersionJS}};
+var FAST_POLL_INTERVAL_MS = 5000;
+var IDLE_POLL_INTERVAL_MS = 15000;
 
 // ── 通用 fetch 封装，强制返回 JSON 并自动带 credentials ──
 function apiFetch(path, body) {
@@ -1911,6 +1913,15 @@ function buildTaskRequestBody(form) {
   return params.toString();
 }
 
+function tableColspan(bodyId, fallback) {
+  var body = document.getElementById(bodyId);
+  if (!body) return fallback;
+  var table = body.closest('table');
+  if (!table) return fallback;
+  var count = table.querySelectorAll('thead th').length;
+  return count || fallback;
+}
+
 function syncClientSelectionCell(row, approved) {
   var cell = row.querySelector('.select-col');
   if (!cell) return;
@@ -1925,6 +1936,7 @@ function syncClientSelectionCell(row, approved) {
     checkbox = cell.querySelector('.task-client-checkbox');
   }
   checkbox.value = row.dataset.clientId;
+  checkbox.setAttribute('aria-label', '选择客户端 ' + (row.dataset.name || row.dataset.clientId));
   checkbox.checked = keepChecked;
 }
 
@@ -2131,12 +2143,14 @@ function pollData() {
 
       if (nextTaskViewKey !== taskViewKey) {
         var rb = document.getElementById('runningTaskBody');
+        var runningColspan = tableColspan('runningTaskBody', 12);
         if (rb) rb.innerHTML = runningTasks.length === 0
-          ? '<tr id="noRunningRow"><td colspan="12" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
+          ? '<tr id="noRunningRow"><td colspan="' + runningColspan + '" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
           : runningTasks.map(buildRunningRow).join('');
         var hb = document.getElementById('historyTaskBody');
+        var historyColspan = tableColspan('historyTaskBody', 11);
         if (hb) hb.innerHTML = historyTasks.length === 0
-          ? '<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>'
+          ? '<tr id="noHistoryRow"><td colspan="' + historyColspan + '" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>'
           : historyTasks.map(buildHistoryRow).join('');
       } else {
         runningTasks.forEach(function(t) {
@@ -2204,7 +2218,7 @@ function pollData() {
         pollData();
         return;
       }
-      scheduleNextPoll(sseConnected ? 15000 : 5000);
+      scheduleNextPoll(sseConnected ? IDLE_POLL_INTERVAL_MS : FAST_POLL_INTERVAL_MS);
     });
 }
 pollData();
@@ -2225,7 +2239,7 @@ es.onmessage = function(e) {
 };
 es.onerror = function() {
   sseConnected = false;
-  if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
+  if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 ' + (FAST_POLL_INTERVAL_MS / 1000) + ' 秒自动刷新数据。';
 };
 
 // ── 编辑客户端弹窗 ──
