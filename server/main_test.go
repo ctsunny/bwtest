@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -281,8 +282,88 @@ func TestHandleSSHLoginAuthorized(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/ssh/login", bytes.NewReader(reqBody))
 	w := httptest.NewRecorder()
 
-	handleSSHLogin(Config{}, db).ServeHTTP(w, req)
+	handleSSHLogin(&Config{}, db).ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("handleSSHLogin status = %d, want 200", w.Code)
+	}
+}
+
+func TestHandleSSHLoginUsesUpdatedBarkURL(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	_, err := db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c1", "node-1", "", "secret", 1, time.Now().Format(time.RFC3339), "127.0.0.1", "", "v1")
+	if err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+
+	barkCalled := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case barkCalled <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{}
+	handler := handleSSHLogin(cfg, db)
+	cfg.BarkURL = srv.URL + "/push-key"
+
+	reqBody, _ := json.Marshal(SSHLoginReq{
+		ClientID:    "c1",
+		ClientToken: "secret",
+		LoginIP:     "203.0.113.7",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/ssh/login", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleSSHLogin status = %d, want 200", w.Code)
+	}
+
+	select {
+	case <-barkCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected bark push to use updated config")
+	}
+}
+
+func TestHandleGenInstallCmdReturnsJSON(t *testing.T) {
+	cfg := &Config{InitToken: "init-secret"}
+	form := "gen_name=node-1&gen_remark=hello&gen_version=v1.2.3"
+	req := httptest.NewRequest(http.MethodPost, "/admin/gen/install-cmd", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Host = "panel.example.com"
+	w := httptest.NewRecorder()
+
+	handleGenInstallCmd("/admin", cfg).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleGenInstallCmd status = %d, want 200", w.Code)
+	}
+
+	var resp struct {
+		OK           bool   `json:"ok"`
+		GeneratedCmd string `json:"generated_cmd"`
+		GenVersion   string `json:"gen_version"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK {
+		t.Fatal("expected ok=true in response")
+	}
+	if resp.GenVersion != "v1.2.3" {
+		t.Fatalf("gen_version = %q, want %q", resp.GenVersion, "v1.2.3")
+	}
+	if !strings.Contains(resp.GeneratedCmd, "--client-name 'node-1'") {
+		t.Fatalf("generated command missing client name: %q", resp.GeneratedCmd)
+	}
+	if !strings.Contains(resp.GeneratedCmd, "--init-token init-secret") {
+		t.Fatalf("generated command missing init token: %q", resp.GeneratedCmd)
 	}
 }

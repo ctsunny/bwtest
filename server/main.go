@@ -356,27 +356,27 @@ func main() {
 	go watchStuckTasks(db, broker)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/register", jsonHandler(handleRegister(cfg, db, broker)))
+	mux.HandleFunc("/api/register", jsonHandler(handleRegister(&cfg, db, broker)))
 	mux.HandleFunc("/api/heartbeat", jsonHandler(handleHeartbeat(db)))
-	mux.HandleFunc("/api/ssh/login", jsonHandler(handleSSHLogin(cfg, db)))
+	mux.HandleFunc("/api/ssh/login", jsonHandler(handleSSHLogin(&cfg, db)))
 	mux.HandleFunc("/api/task/next", jsonHandler(handleNextTask(cfg, db, broker)))
-	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(cfg, db, broker)))
+	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(&cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
 	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
 
 	p := cfg.PanelPath
-	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(cfg, db))))
+	mux.Handle(p, basicAuth(cfg, http.HandlerFunc(handleAdmin(&cfg, db))))
 	mux.Handle(p+"/approve", basicAuth(cfg, http.HandlerFunc(handleApprove(p, cfg, db, broker))))
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
 	mux.Handle(p+"/client/upgrade", basicAuth(cfg, http.HandlerFunc(handlePushUpgrade(p, db))))
 	mux.Handle(p+"/client/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteClient(p, db, broker))))
-	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, cfg, db, broker))))
+	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, &cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
 	mux.Handle(p+"/task/logs", basicAuth(cfg, http.HandlerFunc(handleGetTaskLogs(db))))
 	mux.Handle(p+"/task/clear-history", basicAuth(cfg, http.HandlerFunc(handleClearHistory(p, db, broker))))
-	mux.Handle(p+"/gen/install-cmd", basicAuth(cfg, http.HandlerFunc(handleGenInstallCmd(p, cfg))))
+	mux.Handle(p+"/gen/install-cmd", basicAuth(cfg, http.HandlerFunc(handleGenInstallCmd(p, &cfg))))
 	mux.Handle(p+"/settings", basicAuth(cfg, http.HandlerFunc(handleSettings(p, &cfg))))
 	mux.Handle(p+"/events", basicAuth(cfg, http.HandlerFunc(handleEvents(broker))))
 	mux.Handle(p+"/restart", basicAuth(cfg, http.HandlerFunc(handleRestart(p))))
@@ -645,7 +645,7 @@ func pacedWrite(w io.Writer, mbps int, deadline time.Time, keep func() bool) err
 
 // ── API Handlers (client-facing) ──────────────────────────────────────────────
 
-func handleRegister(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleRegister(cfg *Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Rate-limit registration attempts: max 20 per IP per minute.
 		ip := realIP(r)
@@ -719,7 +719,7 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleSSHLogin(cfg Config, db *sql.DB) http.HandlerFunc {
+func handleSSHLogin(cfg *Config, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SSHLoginReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -835,7 +835,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	}
 }
 
-func handleTaskResult(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleTaskResult(cfg *Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ResultReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1186,7 +1186,7 @@ document.getElementById('restartBtn').addEventListener('click', function() {
 
 // ── Admin Handlers (panel-facing) ─────────────────────────────────────────────
 
-func handleAdmin(cfg Config, db *sql.DB) http.HandlerFunc {
+func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clients := mustClients(db)
 		tasks := mustTasks(db)
@@ -1633,7 +1633,7 @@ input:focus, select:focus, textarea:focus {
       <span class="modal-title">➕ 接入新客户端</span>
       <button type="button" class="modal-x" onclick="document.getElementById('genModal').classList.remove('open')">✕</button>
     </div>
-    <form method="post" action="{{.PanelPath}}/gen/install-cmd">
+    <form id="genForm" method="post" action="{{.PanelPath}}/gen/install-cmd">
       <div style="display:flex;flex-direction:column;gap:12px">
         <div>
           <label class="note" style="display:block;margin-bottom:4px">客户端名称 *</label>
@@ -1665,27 +1665,32 @@ input:focus, select:focus, textarea:focus {
       <div class="h2-icon">🖥</div>
       <h2>客户端列表</h2>
     </div>
+    <div style="display:flex;gap:10px;font-size:12px">
+      <button type="button" class="sec" id="selectAllClientsBtn">全选任务目标</button>
+      <button type="button" class="sec" id="deselectAllClientsBtn">清空选择</button>
+    </div>
   </div>
   <div class="tbl-wrap">
   <table>
     <thead><tr>
-      <th>名称</th><th>版本</th><th>备注</th><th>批准</th>
+      <th>选择</th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
       <th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
     </tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
     <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-ssh-attempts="{{.SSHAttempts}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
-      <td data-label="名称"><strong style="font-weight:600">{{.Name}}</strong></td>
+      <td data-label="选择" class="select-col">{{if .Approved}}<input type="checkbox" class="task-client-checkbox" value="{{.ID}}" aria-label="选择客户端 {{.Name}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">{{else}}-{{end}}</td>
+      <td data-label="名称" class="name-col"><strong style="font-weight:600">{{.Name}}</strong></td>
       <td data-label="版本"><code style="font-size:11px;background:var(--surf2);padding:2px 7px;border-radius:5px;border:1px solid var(--bdr);font-family:monospace">{{.Version}}</code></td>
-      <td data-label="备注" style="color:var(--tx2)">{{.Remark}}</td>
-      <td data-label="批准">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
+      <td data-label="备注" class="remark-col" style="color:var(--tx2)">{{.Remark}}</td>
+      <td data-label="批准" class="approve-col">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
       <td data-label="延迟" class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
       <td data-label="SSH尝试" class="sshattempt-col">{{.SSHAttempts}}</td>
       <td data-label="心跳" class="lastseen-col" style="color:var(--tx3);font-size:12px">{{.LastSeen | shortTime}}</td>
-      <td data-label="IP" style="font-family:monospace;font-size:12px;color:var(--tx2)">{{.RemoteIP}}</td>
+      <td data-label="IP" class="ip-col" style="font-family:monospace;font-size:12px;color:var(--tx2)">{{.RemoteIP}}</td>
       <td data-label="任务" class="curtask-col" style="font-family:monospace;font-size:11px;color:var(--tx3)">{{.CurrentTask}}</td>
       <td data-label="操作">
-        <div style="display:flex;gap:5px;flex-wrap:wrap">
+        <div class="client-actions" style="display:flex;gap:5px;flex-wrap:wrap">
           {{if (not .Approved)}}<button type="button" class="approve-btn" data-id="{{.ID}}" style="background:var(--ok)">批准</button>{{end}}
           <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
           <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级码</button>
@@ -1711,23 +1716,6 @@ input:focus, select:focus, textarea:focus {
   <form id="taskForm" method="post" action="{{.PanelPath}}/task/create">
     <div class="grid">
       <div>
-        <label class="note" style="display:flex; justify-content:space-between; margin-bottom:4px">
-          <span>选择客户端</span>
-          <span style="display:flex;gap:10px">
-            <span id="selectAllBtn" style="font-size:11px;color:var(--primary);cursor:pointer">全选</span>
-            <span id="deselectAllBtn" style="font-size:11px;color:var(--tx3);cursor:pointer">全不选</span>
-          </span>
-        </label>
-        <div id="clientCheckboxList" style="max-height:120px;overflow-y:auto;border:1.5px solid var(--bdr);border-radius:var(--r-sm);padding:6px 10px;background:var(--surf);display:flex;flex-direction:column;gap:6px">
-          {{range .ApprovedClients}}
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400;color:var(--tx)">
-            <input type="checkbox" name="client_id" value="{{.ID}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">
-            {{.Name}}
-          </label>
-          {{end}}
-        </div>
-      </div>
-      <div>
         <label class="note">模式</label>
         <select name="mode" style="margin-top:4px">
           <option value="upload">上传</option>
@@ -1737,11 +1725,11 @@ input:focus, select:focus, textarea:focus {
       </div>
       <div>
         <label class="note">上传 Mbps</label>
-        <input name="up_mbps" value="10" style="margin-top:4px">
+        <input name="up_mbps" value="1" style="margin-top:4px">
       </div>
       <div>
         <label class="note">下载 Mbps</label>
-        <input name="down_mbps" value="10" style="margin-top:4px">
+        <input name="down_mbps" value="1" style="margin-top:4px">
       </div>
       <div>
         <label class="note">时长</label>
@@ -1761,12 +1749,12 @@ input:focus, select:focus, textarea:focus {
       </div>
     </div>
   </form>
-  <div class="tip">提示：勾选客户端复选框可同时下发任务给多个客户端。</div>
+  <div class="tip">提示：先在上方客户端列表勾选目标服务器，可同时下发任务给多个客户端。</div>
   <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--bdr)">
     <span class="note" style="font-weight:700">⚡ 快速测速:</span>
-    <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (10M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="download">📥 1min 下载 (10M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="both">🔄 1min 双向 (10M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="download">📥 1min 下载 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="both">🔄 1min 双向 (1M)</button>
   </div>
 </div>
 
@@ -1867,6 +1855,8 @@ var PANEL_PATH = {{.PanelPathJS}};
 var INIT_TOKEN  = {{.InitTokenJS}};
 var PANEL_ADDR  = location.host;
 var VERSION     = {{.VersionJS}};
+var FAST_POLL_INTERVAL_MS = 5000;
+var IDLE_POLL_INTERVAL_MS = 15000;
 
 // ── 通用 fetch 封装，强制返回 JSON 并自动带 credentials ──
 function apiFetch(path, body) {
@@ -1894,6 +1884,88 @@ var clientNameMap = {};
 document.querySelectorAll('#clientBody tr[data-client-id]').forEach(function(row) {
   clientNameMap[row.dataset.clientId] = row.dataset.name || row.dataset.clientId;
 });
+
+function getTaskClientCheckboxes() {
+  return document.querySelectorAll('#clientBody .task-client-checkbox');
+}
+
+function getSelectedClientIDs() {
+  var ids = [];
+  getTaskClientCheckboxes().forEach(function(cb) {
+    if (cb.checked) ids.push(cb.value);
+  });
+  return ids;
+}
+
+function setSelectedClientIDs(ids) {
+  var wanted = {};
+  ids.forEach(function(id) { wanted[id] = true; });
+  getTaskClientCheckboxes().forEach(function(cb) {
+    cb.checked = !!wanted[cb.value];
+  });
+}
+
+function buildTaskRequestBody(form) {
+  var params = new URLSearchParams(new FormData(form));
+  getSelectedClientIDs().forEach(function(id) {
+    params.append('client_id', id);
+  });
+  return params.toString();
+}
+
+function tableColspan(bodyId, fallback) {
+  var body = document.getElementById(bodyId);
+  if (!body) return fallback;
+  var table = body.closest('table');
+  if (!table) return fallback;
+  var count = table.querySelectorAll('thead th').length;
+  return count || fallback;
+}
+
+function syncClientSelectionCell(row, approved) {
+  var cell = row.querySelector('.select-col');
+  if (!cell) return;
+  var checkbox = cell.querySelector('.task-client-checkbox');
+  var keepChecked = !!(checkbox && checkbox.checked);
+  if (!approved) {
+    cell.textContent = '-';
+    return;
+  }
+  if (!checkbox) {
+    cell.innerHTML = '<input type="checkbox" class="task-client-checkbox" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">';
+    checkbox = cell.querySelector('.task-client-checkbox');
+  }
+  checkbox.value = row.dataset.clientId;
+  checkbox.setAttribute('aria-label', '选择客户端 ' + (row.dataset.name || row.dataset.clientId));
+  checkbox.checked = keepChecked;
+}
+
+function syncClientApprovalUI(row, approved) {
+  row.dataset.approved = approved ? '1' : '0';
+  var approvalCell = row.querySelector('.approve-col');
+  if (approvalCell) {
+    approvalCell.innerHTML = approved
+      ? '<span class="badge done">YES</span>'
+      : '<span class="badge pending">NO</span>';
+  }
+  syncClientSelectionCell(row, approved);
+  var actions = row.querySelector('.client-actions');
+  if (!actions) return;
+  var approveBtn = actions.querySelector('.approve-btn');
+  if (approved) {
+    if (approveBtn) approveBtn.remove();
+    return;
+  }
+  if (!approveBtn) {
+    approveBtn = document.createElement('button');
+    approveBtn.type = 'button';
+    approveBtn.className = 'approve-btn';
+    approveBtn.dataset.id = row.dataset.clientId;
+    approveBtn.style.background = 'var(--ok)';
+    approveBtn.textContent = '批准';
+    actions.insertBefore(approveBtn, actions.firstChild);
+  }
+}
 
 function fmtGB(bytes) {
   if (!bytes || bytes === 0) return '0.000 GB';
@@ -1938,9 +2010,6 @@ function tickPing() {
   syncRunningTaskLatency();
 }
 // 数据刷新时同步更新一次这块 UI 就够了，不需要单独的计时器高频刷了
-
-
-var knownTaskStatus = {};
 
 function fmtShortTime(s) {
   if (!s) return '';
@@ -2040,7 +2109,29 @@ function updateStats(data) {
   if (elTraffic) elTraffic.textContent = fmtGB(totalTraffic);
 }
 
+function taskLayoutKey(tasks) {
+  return tasks.map(function(t) {
+    return [t.id, t.status, t.client_id, t.started_at || '', t.finished_at || ''].join(':');
+  }).join('|');
+}
+
+var pollTimer = null;
+var pollInFlight = false;
+var queuedPoll = false;
+var sseConnected = false;
+var taskViewKey = '';
+
+function scheduleNextPoll(delay) {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(function() { pollData(); }, delay);
+}
+
 function pollData() {
+  if (pollInFlight) {
+    queuedPoll = true;
+    return;
+  }
+  pollInFlight = true;
   fetch('/api/data', {credentials: 'include', cache: 'no-store'})
     .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function(data) {
@@ -2048,40 +2139,18 @@ function pollData() {
       var runningStatuses = ['running', 'pending', 'stopping'];
       var runningTasks = tasks.filter(function(t) { return runningStatuses.indexOf(t.status) !== -1; });
       var historyTasks = tasks.filter(function(t) { return runningStatuses.indexOf(t.status) === -1; });
+      var nextTaskViewKey = taskLayoutKey(runningTasks) + '//' + taskLayoutKey(historyTasks);
 
-      var needFullRefresh = false;
-      tasks.forEach(function(t) {
-        var prev = knownTaskStatus[t.id];
-        if (prev !== undefined && prev !== t.status) {
-          if ((runningStatuses.indexOf(prev) !== -1) !== (runningStatuses.indexOf(t.status) !== -1)) {
-            needFullRefresh = true;
-          }
-        }
-        knownTaskStatus[t.id] = t.status;
-      });
-      runningTasks.forEach(function(t) {
-        if (!document.querySelector('#runningTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
-      });
-      historyTasks.forEach(function(t) {
-        if (!document.querySelector('#historyTaskBody [data-task-id="' + t.id + '"]')) needFullRefresh = true;
-      });
-      document.querySelectorAll('#runningTaskBody tr[data-task-id]').forEach(function(row) {
-        var id = row.dataset.taskId;
-        if (!tasks.some(function(t) { return t.id === id; })) needFullRefresh = true;
-      });
-      document.querySelectorAll('#historyTaskBody tr[data-task-id]').forEach(function(row) {
-        var id = row.dataset.taskId;
-        if (!tasks.some(function(t) { return t.id === id; })) needFullRefresh = true;
-      });
-
-      if (needFullRefresh) {
+      if (nextTaskViewKey !== taskViewKey) {
         var rb = document.getElementById('runningTaskBody');
+        var runningColspan = tableColspan('runningTaskBody', 12);
         if (rb) rb.innerHTML = runningTasks.length === 0
-          ? '<tr id="noRunningRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
+          ? '<tr id="noRunningRow"><td colspan="' + runningColspan + '" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
           : runningTasks.map(buildRunningRow).join('');
         var hb = document.getElementById('historyTaskBody');
+        var historyColspan = tableColspan('historyTaskBody', 11);
         if (hb) hb.innerHTML = historyTasks.length === 0
-          ? '<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>'
+          ? '<tr id="noHistoryRow"><td colspan="' + historyColspan + '" style="text-align:center;color:var(--muted);padding:20px">暂无历史任务</td></tr>'
           : historyTasks.map(buildHistoryRow).join('');
       } else {
         runningTasks.forEach(function(t) {
@@ -2093,39 +2162,35 @@ function pollData() {
           if (pCol) pCol.innerHTML = buildProgress(t);
           if (upCol) upCol.textContent = fmtGB(t.upload_bytes);
           if (dnCol) dnCol.textContent = fmtGB(t.download_bytes);
-          var badge = row.querySelector('.badge');
-          if (badge) { badge.className = 'badge ' + t.status; badge.textContent = t.status; }
-          // 同步操作按钮：running→停止, pending→取消, 其他→-
-          var opCell = row.cells[row.cells.length - 1];
-          if (opCell) {
-            var existBtn = opCell.querySelector('.stop-btn');
-            var wantRunning = t.status === 'running';
-            var wantPending = t.status === 'pending';
-            var hasBtn = !!existBtn;
-            var curClass = existBtn ? existBtn.className : '';
-            var isDanger = curClass.indexOf('danger') !== -1;
-            var isWarn   = curClass.indexOf('warn') !== -1;
-
-            if (wantRunning && (!hasBtn || !isDanger)) {
-              opCell.innerHTML = '<button type="button" class="danger stop-btn" data-task-id="'+t.id+'">🛑 停止</button>';
-            } else if (wantPending && (!hasBtn || !isWarn)) {
-              opCell.innerHTML = '<button type="button" class="warn stop-btn" data-task-id="'+t.id+'">✖ 取消</button>';
-            } else if (!wantRunning && !wantPending && hasBtn) {
-              opCell.innerHTML = '<button type="button" class="danger force-del-btn" data-task-id="'+t.id+'">🗑 强制删除</button>';
-            }
-          }
         });
       }
+      taskViewKey = nextTaskViewKey;
 
       var clients = data.clients || [];
+      var shouldReloadClients = clients.length !== document.querySelectorAll('#clientBody tr[data-client-id]').length;
+      if (!shouldReloadClients) {
+        shouldReloadClients = clients.some(function(c) {
+          return !document.querySelector('#clientBody [data-client-id="' + c.id + '"]');
+        });
+      }
+      if (shouldReloadClients) {
+        window.location.reload();
+        return;
+      }
       clients.forEach(function(c) {
         var row = document.querySelector('#clientBody [data-client-id="' + c.id + '"]');
         if (!row) return;
-        if (c.last_seen) {
-          row.dataset.lastSeen = c.last_seen;
-          var lsCol = row.querySelector('.lastseen-col');
-          if (lsCol) lsCol.textContent = fmtShortTime(c.last_seen);
-        }
+        row.dataset.name = c.name || row.dataset.name || '';
+        row.dataset.remark = c.remark || '';
+        if (c.name) clientNameMap[c.id] = c.name;
+        var nameCell = row.querySelector('.name-col strong');
+        if (nameCell && c.name !== undefined) nameCell.textContent = c.name || c.id;
+        var remarkCell = row.querySelector('.remark-col');
+        if (remarkCell && c.remark !== undefined) remarkCell.textContent = c.remark || '';
+        syncClientApprovalUI(row, !!c.approved);
+        row.dataset.lastSeen = c.last_seen || '';
+        var lsCol = row.querySelector('.lastseen-col');
+        if (lsCol) lsCol.textContent = fmtShortTime(c.last_seen || '');
         if (c.latency !== undefined) {
           row.dataset.latency = c.latency;
         }
@@ -2134,9 +2199,10 @@ function pollData() {
           var sshCell = row.querySelector('.sshattempt-col');
           if (sshCell) sshCell.textContent = c.ssh_attempts;
         }
+        var ipCell = row.querySelector('.ip-col');
+        if (ipCell && c.remote_ip !== undefined) ipCell.textContent = c.remote_ip || '';
         var ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
-        if (c.name) clientNameMap[c.id] = c.name;
       });
       tickPing();
 
@@ -2144,22 +2210,36 @@ function pollData() {
       var hint = document.getElementById('taskRefreshHint');
       if (hint) hint.textContent = '(上次同步: ' + new Date().toLocaleTimeString() + ')';
     })
-    .catch(function(){});
+    .catch(function(){})
+    .finally(function() {
+      pollInFlight = false;
+      if (queuedPoll) {
+        queuedPoll = false;
+        pollData();
+        return;
+      }
+      scheduleNextPoll(sseConnected ? IDLE_POLL_INTERVAL_MS : FAST_POLL_INTERVAL_MS);
+    });
 }
-setInterval(pollData, 5000);
 pollData();
 tickPing();
 
 var es = new EventSource(PANEL_PATH + '/events');
 var liveStatus = document.getElementById('liveStatus');
 es.onmessage = function(e) {
+  if (e.data === 'ready') {
+    sseConnected = true;
+    if (liveStatus) liveStatus.textContent = '实时消息流已连接，空闲时将降低轮询频率。';
+    return;
+  }
   if (e.data !== 'ping' && e.data !== 'ready') {
     pollData();
     if (liveStatus) liveStatus.textContent = '检测到状态变化，已立即刷新。';
   }
 };
 es.onerror = function() {
-  if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 5 秒自动刷新数据。';
+  sseConnected = false;
+  if (liveStatus) liveStatus.textContent = '实时消息流异常，仍会每 ' + (FAST_POLL_INTERVAL_MS / 1000) + ' 秒自动刷新数据。';
 };
 
 // ── 编辑客户端弹窗 ──
@@ -2299,9 +2379,7 @@ delegate('clientBody', 'del-client-btn', function(target) {
 });
 
 delegate('historyTaskBody', 'clone-btn', function(target) {
-    document.querySelectorAll('#clientCheckboxList input[type="checkbox"]').forEach(function(cb) {
-        cb.checked = (cb.value === target.dataset.client);
-    });
+    setSelectedClientIDs([target.dataset.client]);
     document.querySelector('select[name="mode"]').value = target.dataset.mode;
     document.querySelector('input[name="up_mbps"]').value = target.dataset.up;
     document.querySelector('input[name="down_mbps"]').value = target.dataset.down;
@@ -2344,6 +2422,28 @@ document.getElementById('copyCmdBtn').addEventListener('click', function() {
   el.select();
   document.execCommand('copy');
   alert('已复制到剪贴板');
+});
+var genForm = document.getElementById('genForm');
+if (genForm) genForm.addEventListener('submit', function(e) {
+  e.preventDefault();
+  var btn = document.getElementById('genBtn');
+  if (btn) btn.disabled = true;
+  apiFetch('/gen/install-cmd', new URLSearchParams(new FormData(genForm)).toString())
+    .then(function(resp) {
+      var cmd = resp.generated_cmd || '';
+      var cmdBox = document.getElementById('cmdBox');
+      var cmdText = document.getElementById('cmdText');
+      var cmdTip = document.getElementById('cmdTip');
+      if (cmdText) cmdText.value = cmd;
+      if (cmdBox) cmdBox.style.display = cmd ? 'flex' : 'none';
+      if (cmdTip) cmdTip.textContent = cmd ? '将此命令复制到客户端 VPS 上执行即可完成安装与注册。' : '';
+      document.getElementById('genModal').classList.add('open');
+      if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.history.replaceState) {
+        window.history.replaceState({}, document.title, PANEL_PATH);
+      }
+    })
+    .catch(function(err) { alert('生成命令失败: ' + err); })
+    .finally(function() { if (btn) btn.disabled = false; });
 });
 
 function closeModalOnBackdrop(modalId) {
@@ -2388,10 +2488,9 @@ if (toggleHistoryBtnEl) toggleHistoryBtnEl.addEventListener('click', function() 
 var taskForm = document.getElementById('taskForm');
 if (taskForm) taskForm.addEventListener('submit', function(e) {
   e.preventDefault();
-  var checked = document.querySelectorAll('#clientCheckboxList input[type="checkbox"]:checked');
-  if (checked.length === 0) { alert('请先勾选至少一个客户端'); return; }
-  var fd = new FormData(taskForm);
-  var body = new URLSearchParams(fd).toString();
+  var selectedIDs = getSelectedClientIDs();
+  if (selectedIDs.length === 0) { alert('请先在上方客户端列表勾选至少一个客户端'); return; }
+  var body = buildTaskRequestBody(taskForm);
   var btn = document.getElementById('createTaskBtn');
   if (btn) btn.disabled = true;
   apiFetch('/task/create', body)
@@ -2400,27 +2499,31 @@ if (taskForm) taskForm.addEventListener('submit', function(e) {
     .finally(function() { if (btn) btn.disabled = false; });
 });
 
-var sab = document.getElementById('selectAllBtn');
+var sab = document.getElementById('selectAllClientsBtn');
 if (sab) sab.addEventListener('click', function() {
-  document.querySelectorAll('#clientCheckboxList input[type="checkbox"]').forEach(function(cb) { cb.checked = true; });
+  getTaskClientCheckboxes().forEach(function(cb) { cb.checked = true; });
 });
-var dsab = document.getElementById('deselectAllBtn');
+var dsab = document.getElementById('deselectAllClientsBtn');
 if (dsab) dsab.addEventListener('click', function() {
-  document.querySelectorAll('#clientCheckboxList input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
+  getTaskClientCheckboxes().forEach(function(cb) { cb.checked = false; });
 });
 
 document.querySelectorAll('.flash-test-btn').forEach(function(b) {
   b.addEventListener('click', function() {
-    var checked = document.querySelectorAll('#clientCheckboxList input[type="checkbox"]:checked');
-    if (checked.length === 0) { alert('请先在上方勾选客户端'); return; }
+    var checked = getSelectedClientIDs();
+    if (checked.length === 0) { alert('请先在上方客户端列表勾选客户端'); return; }
     document.querySelector('select[name="mode"]').value = b.dataset.mode;
-    document.querySelector('input[name="up_mbps"]').value = '10';
-    document.querySelector('input[name="down_mbps"]').value = '10';
+    document.querySelector('input[name="up_mbps"]').value = '1';
+    document.querySelector('input[name="down_mbps"]').value = '1';
     document.querySelector('input[name="duration_val"]').value = '1';
     document.querySelector('select[name="duration_unit"]').value = 'min';
     taskForm.dispatchEvent(new Event('submit'));
   });
 });
+
+if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.history.replaceState) {
+  window.history.replaceState({}, document.title, PANEL_PATH);
+}
 
 })();
 </script>
@@ -2509,7 +2612,7 @@ document.querySelectorAll('.flash-test-btn').forEach(function(b) {
 	}
 }
 
-func handleGenInstallCmd(panelPath string, cfg Config) http.HandlerFunc {
+func handleGenInstallCmd(panelPath string, cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		name := strings.TrimSpace(r.Form.Get("gen_name"))
@@ -2534,6 +2637,17 @@ func handleGenInstallCmd(panelPath string, cfg Config) http.HandlerFunc {
 				cmd += " --remark '" + strings.ReplaceAll(remark, "'", "'\\''") + "'"
 			}
 			q.Set("gen_cmd", cmd)
+			if strings.Contains(r.Header.Get("Accept"), "application/json") {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":            true,
+					"gen_name":      name,
+					"gen_remark":    remark,
+					"gen_version":   version,
+					"generated_cmd": cmd,
+				})
+				return
+			}
 		}
 		http.Redirect(w, r, panelPath+"?"+q.Encode(), http.StatusFound)
 	}
@@ -2734,7 +2848,7 @@ func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.Handler
 	}
 }
 
-func handleCreateTask(panelPath string, cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
+func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		clientIDs := r.Form["client_id"]
