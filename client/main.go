@@ -660,7 +660,7 @@ func (e sshLoginEvent) key() string {
 
 func sshMonitorLoop(cfg *Config) {
 	successTicker := time.NewTicker(30 * time.Second)
-	failedTicker := time.NewTicker(time.Hour)
+	failedTicker := time.NewTicker(30 * time.Second)
 	defer successTicker.Stop()
 	defer failedTicker.Stop()
 
