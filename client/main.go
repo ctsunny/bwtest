@@ -481,8 +481,10 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 
 func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Duration) (net.Conn, error) {
 	rateMbps := 0
+	pathMode := "upload"
 	if mode == "download" {
 		rateMbps = mbps
+		pathMode = mode
 	}
 	conn, err := net.DialTimeout("tcp", t.DataAddr, 10*time.Second)
 	if err != nil {
@@ -497,7 +499,7 @@ func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Dur
 		DurationSec: max(1, int(duration.Seconds())),
 	})
 	helloStr := string(hello) + "\n"
-	reqHeader := fmt.Sprintf("POST /api/video/%s HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", mode, len(helloStr))
+	reqHeader := fmt.Sprintf("POST /api/video/%s HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", pathMode, len(helloStr))
 	if _, err := conn.Write(append([]byte(reqHeader), []byte(helloStr)...)); err != nil {
 		conn.Close()
 		return nil, err
