@@ -1828,9 +1828,9 @@ input:focus, select:focus, textarea:focus {
       <div class="form-group">
         <label class="note">密度</label>
         <div class="density-wrap">
-          <label class="density-opt" title="无间歇，全程持续运行"><input type="radio" name="density" value="0" checked><span class="density-label">🔴 无间歇</span></label>
-          <label class="density-opt" title="30% 时间随机暂停"><input type="radio" name="density" value="30"><span class="density-label">🟡 30% 间歇</span></label>
-          <label class="density-opt" title="70% 时间随机暂停"><input type="radio" name="density" value="70"><span class="density-label">🟢 70% 间歇</span></label>
+          <label class="density-opt" for="density-0" title="无间歇，全程持续运行"><input type="radio" name="density" id="density-0" value="0" checked><span class="density-label">🔴 无间歇</span></label>
+          <label class="density-opt" for="density-30" title="30% 时间随机暂停"><input type="radio" name="density" id="density-30" value="30"><span class="density-label">🟡 30% 间歇</span></label>
+          <label class="density-opt" for="density-70" title="70% 时间随机暂停"><input type="radio" name="density" id="density-70" value="70"><span class="density-label">🟢 70% 间歇</span></label>
         </div>
       </div>
       <div class="form-group" style="align-self:end">

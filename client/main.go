@@ -599,7 +599,8 @@ func buildIntermissionSchedule(start, deadline time.Time, densityPct int) []time
 				pd = remainPause
 			} else {
 				maxPart := remainPause / time.Duration(numPauses-i)
-				pd = time.Duration(cryptoRandIntn(int(maxPart/time.Millisecond)+1)) * time.Millisecond
+				msMax := safeMs(maxPart) + 1
+				pd = time.Duration(cryptoRandIntn(msMax)) * time.Millisecond
 				if pd < time.Second {
 					pd = time.Second
 				}
@@ -612,7 +613,7 @@ func buildIntermissionSchedule(start, deadline time.Time, densityPct int) []time
 			if maxOffset < 0 {
 				maxOffset = 0
 			}
-			offset := time.Duration(cryptoRandIntn(int(maxOffset/time.Millisecond)+1)) * time.Millisecond
+			offset := time.Duration(cryptoRandIntn(safeMs(maxOffset)+1)) * time.Millisecond
 			pauses = append(pauses, interval{offsetStart: offset, dur: pd})
 			remainPause -= pd
 		}
@@ -688,13 +689,26 @@ func cryptoRandIntn(n int) int {
 	if n <= 0 {
 		return 0
 	}
-	var buf [8]byte
+	var buf [4]byte
 	_, _ = rand.Read(buf[:])
 	v := int(buf[0])<<24 | int(buf[1])<<16 | int(buf[2])<<8 | int(buf[3])
 	if v < 0 {
 		v = -v
 	}
 	return v % n
+}
+
+// safeMs converts a time.Duration to milliseconds as int, capping at max safe value.
+func safeMs(d time.Duration) int {
+	ms := d / time.Millisecond
+	if ms < 0 {
+		return 0
+	}
+	const maxSafe = 1<<31 - 2 // avoid overflow when caller adds 1
+	if ms > time.Duration(maxSafe) {
+		return maxSafe
+	}
+	return int(ms)
 }
 
 func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Duration) (net.Conn, error) {
