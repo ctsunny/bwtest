@@ -57,6 +57,7 @@ type Task struct {
 	UpMbps      int    `json:"up_mbps"`
 	DownMbps    int    `json:"down_mbps"`
 	DurationSec int    `json:"duration_sec"`
+	Density     int    `json:"density"`
 	DataAddr    string `json:"data_addr"`
 }
 
@@ -440,6 +441,13 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 	go progressLoop(cfg, t.ID, &totalUp, &totalDown, progressStop)
 	defer close(progressStop)
 
+	// Generate intermission schedule if density > 0
+	var schedule []timeSlot
+	if t.Density > 0 {
+		schedule = buildIntermissionSchedule(time.Now(), deadline, t.Density)
+		log.Printf("[task %s] density=%d%%, generated %d intermission slots", t.ID, t.Density, countPauses(schedule))
+	}
+
 	for {
 		if time.Now().After(deadline) {
 			return totalUp, totalDown, "done"
@@ -448,6 +456,68 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 			return totalUp, totalDown, "stopped"
 		}
 
+		// If density schedule is active, check if we should pause
+		if len(schedule) > 0 {
+			now := time.Now()
+			slot := currentSlot(schedule, now)
+			if slot != nil && !slot.active {
+				// We are in a pause slot — sleep until slot ends
+				pauseEnd := slot.end
+				if pauseEnd.After(deadline) {
+					pauseEnd = deadline
+				}
+				log.Printf("[task %s] intermission pause until %s (%.0fs)",
+					t.ID, pauseEnd.Format("15:04:05"), time.Until(pauseEnd).Seconds())
+				for time.Now().Before(pauseEnd) {
+					if atomic.LoadInt32(&stopFlag) == 1 {
+						return totalUp, totalDown, "stopped"
+					}
+					if time.Now().After(deadline) {
+						return totalUp, totalDown, "done"
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+				continue
+			}
+			// Find active slot end to limit sub-task duration
+			if slot != nil && slot.active {
+				activeEnd := slot.end
+				if activeEnd.After(deadline) {
+					activeEnd = deadline
+				}
+				remainSec := int(time.Until(activeEnd).Seconds())
+				if remainSec <= 0 {
+					continue
+				}
+				sub := *t
+				sub.DurationSec = remainSec
+				sub.Density = 0 // sub-task doesn't manage density
+
+				up, down, status := runTaskOnce(cfg, &sub, activeEnd, &stopFlag, &totalUp, &totalDown)
+				totalUp = up
+				totalDown = down
+
+				if status == "stopped" {
+					return totalUp, totalDown, "stopped"
+				}
+				if time.Now().After(deadline) {
+					return totalUp, totalDown, "done"
+				}
+				if status != "done" {
+					// connection error — wait and retry
+					log.Printf("[task %s] connection lost, retrying in 5s... (remain %.0fs)", t.ID, time.Until(deadline).Seconds())
+					for i := 0; i < 5; i++ {
+						time.Sleep(time.Second)
+						if time.Now().After(deadline) || atomic.LoadInt32(&stopFlag) == 1 {
+							break
+						}
+					}
+				}
+				continue
+			}
+		}
+
+		// No density or outside scheduled slots: normal execution
 		remainSec := int(time.Until(deadline).Seconds())
 		if remainSec <= 0 {
 			return totalUp, totalDown, "done"
@@ -477,6 +547,154 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 			}
 		}
 	}
+}
+
+// ── Intermission schedule ─────────────────────────────────────────────────────
+
+// timeSlot represents a time interval that is either active (running) or paused.
+type timeSlot struct {
+	start  time.Time
+	end    time.Time
+	active bool
+}
+
+// buildIntermissionSchedule creates a schedule of active/paused slots for the
+// entire task duration. Within each hour, `densityPct`% of the time is paused
+// in randomly-placed, non-continuous intervals using crypto/rand for randomness.
+func buildIntermissionSchedule(start, deadline time.Time, densityPct int) []timeSlot {
+	totalDur := deadline.Sub(start)
+	if totalDur <= 0 {
+		return nil
+	}
+
+	var slots []timeSlot
+	cursor := start
+
+	for cursor.Before(deadline) {
+		// Work in 1-hour chunks (or remaining time if < 1 hour)
+		chunkEnd := cursor.Add(time.Hour)
+		if chunkEnd.After(deadline) {
+			chunkEnd = deadline
+		}
+		chunkDur := chunkEnd.Sub(cursor)
+		pauseTotal := time.Duration(float64(chunkDur) * float64(densityPct) / 100.0)
+
+		// Split the pause time into 2–5 random pause intervals per hour
+		numPauses := 2 + cryptoRandIntn(4) // 2 to 5 pauses
+		if chunkDur < 30*time.Second {
+			numPauses = 1
+		}
+
+		// Generate random pause start points within the chunk
+		type interval struct {
+			offsetStart time.Duration
+			dur         time.Duration
+		}
+		pauses := make([]interval, 0, numPauses)
+		remainPause := pauseTotal
+
+		for i := 0; i < numPauses && remainPause > 0; i++ {
+			var pd time.Duration
+			if i == numPauses-1 {
+				pd = remainPause
+			} else {
+				maxPart := remainPause / time.Duration(numPauses-i)
+				pd = time.Duration(cryptoRandIntn(int(maxPart/time.Millisecond)+1)) * time.Millisecond
+				if pd < time.Second {
+					pd = time.Second
+				}
+			}
+			if pd > remainPause {
+				pd = remainPause
+			}
+			// Random offset within chunk (leaving room for pause duration)
+			maxOffset := chunkDur - pd
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			offset := time.Duration(cryptoRandIntn(int(maxOffset/time.Millisecond)+1)) * time.Millisecond
+			pauses = append(pauses, interval{offsetStart: offset, dur: pd})
+			remainPause -= pd
+		}
+
+		// Sort pauses by start offset, then merge overlapping ones
+		sort.Slice(pauses, func(i, j int) bool {
+			return pauses[i].offsetStart < pauses[j].offsetStart
+		})
+
+		// Merge overlapping intervals
+		merged := make([]interval, 0, len(pauses))
+		for _, p := range pauses {
+			if len(merged) > 0 {
+				last := &merged[len(merged)-1]
+				lastEnd := last.offsetStart + last.dur
+				if p.offsetStart <= lastEnd {
+					newEnd := p.offsetStart + p.dur
+					if newEnd > lastEnd {
+						last.dur = newEnd - last.offsetStart
+					}
+					continue
+				}
+			}
+			merged = append(merged, p)
+		}
+
+		// Convert merged pauses into active/pause slots
+		slotCursor := cursor
+		for _, p := range merged {
+			pauseStart := cursor.Add(p.offsetStart)
+			if pauseStart.After(slotCursor) {
+				slots = append(slots, timeSlot{start: slotCursor, end: pauseStart, active: true})
+			}
+			pauseEnd := pauseStart.Add(p.dur)
+			if pauseEnd.After(chunkEnd) {
+				pauseEnd = chunkEnd
+			}
+			slots = append(slots, timeSlot{start: pauseStart, end: pauseEnd, active: false})
+			slotCursor = pauseEnd
+		}
+		if slotCursor.Before(chunkEnd) {
+			slots = append(slots, timeSlot{start: slotCursor, end: chunkEnd, active: true})
+		}
+
+		cursor = chunkEnd
+	}
+
+	return slots
+}
+
+// currentSlot returns the slot that covers time t, or nil if none found.
+func currentSlot(schedule []timeSlot, t time.Time) *timeSlot {
+	for i := range schedule {
+		if !t.Before(schedule[i].start) && t.Before(schedule[i].end) {
+			return &schedule[i]
+		}
+	}
+	return nil
+}
+
+func countPauses(schedule []timeSlot) int {
+	n := 0
+	for _, s := range schedule {
+		if !s.active {
+			n++
+		}
+	}
+	return n
+}
+
+// cryptoRandIntn returns a cryptographically random int in [0, n).
+func cryptoRandIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	var buf [8]byte
+	_, _ = rand.Read(buf[:])
+	v := int(buf[0])<<24 | int(buf[1])<<16 | int(buf[2])<<8 | int(buf[3])
+	if v < 0 {
+		v = -v
+	}
+	return v % n
 }
 
 func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Duration) (net.Conn, error) {
