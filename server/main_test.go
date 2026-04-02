@@ -199,6 +199,10 @@ func TestCreateTaskValidation(t *testing.T) {
 		{"upload", 100, 0, 60, false},
 		{"download", 0, 100, 60, false},
 		{"both", 100, 100, 60, false},
+		{"traditional", 100, 100, 60, false},
+		{"browse", 10, 50, 60, false},
+		{"stream", 5, 100, 60, false},
+		{"backup", 100, 5, 60, false},
 		{"invalid", 100, 100, 60, true},
 		{"upload", -1, 0, 60, true},
 		{"upload", maxMbps + 1, 0, 60, true},
@@ -207,7 +211,7 @@ func TestCreateTaskValidation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		invalid := false
-		if tc.mode != "upload" && tc.mode != "download" && tc.mode != "both" {
+		if !isValidTaskMode(tc.mode) {
 			invalid = true
 		}
 		if tc.up < 0 || tc.up > maxMbps {
@@ -222,6 +226,21 @@ func TestCreateTaskValidation(t *testing.T) {
 		if invalid != tc.wantInvalid {
 			t.Errorf("mode=%q up=%d down=%d dur=%d: invalid=%v, want %v",
 				tc.mode, tc.up, tc.down, tc.dur, invalid, tc.wantInvalid)
+		}
+	}
+}
+
+func TestTaskModeLabel(t *testing.T) {
+	tests := map[string]string{
+		"both":        "传统",
+		"traditional": "传统",
+		"browse":      "网页浏览",
+		"stream":      "流媒体",
+		"backup":      "备份同步",
+	}
+	for mode, want := range tests {
+		if got := taskModeLabel(mode); got != want {
+			t.Fatalf("taskModeLabel(%q) = %q, want %q", mode, got, want)
 		}
 	}
 }

@@ -97,7 +97,17 @@ type DataHello struct {
 	ClientToken string `json:"client_token"`
 	TaskID      string `json:"task_id"`
 	Mode        string `json:"mode"`
+	RateMbps    int    `json:"rate_mbps,omitempty"`
 	DurationSec int    `json:"duration_sec"`
+}
+
+func normalizeTaskMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "both":
+		return "traditional"
+	default:
+		return strings.TrimSpace(mode)
+	}
 }
 
 var busy int32
@@ -469,100 +479,250 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 	}
 }
 
-// runTaskOnce attempts a single connection and runs until done/stopped/error.
-// totalUp/totalDown are the running accumulators (passed in, updated in place).
-func runTaskOnce(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) (int64, int64, string) {
+func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Duration) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", t.DataAddr, 10*time.Second)
 	if err != nil {
-		log.Printf("dial error: %v", err)
-		return *totalUp, *totalDown, "connfail"
+		return nil, err
 	}
-	defer conn.Close()
-
 	hello, _ := json.Marshal(DataHello{
 		ClientID:    cfg.ClientID,
 		ClientToken: cfg.ClientToken,
 		TaskID:      t.ID,
-		Mode:        t.Mode,
-		DurationSec: t.DurationSec,
+		Mode:        mode,
+		RateMbps:    mbps,
+		DurationSec: max(1, int(duration.Seconds())),
 	})
 	helloStr := string(hello) + "\n"
-	reqHeader := fmt.Sprintf("POST /api/video/upload HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", len(helloStr))
+	reqHeader := fmt.Sprintf("POST /api/video/%s HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", mode, len(helloStr))
 	if _, err := conn.Write(append([]byte(reqHeader), []byte(helloStr)...)); err != nil {
-		return *totalUp, *totalDown, "connfail"
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func waitForPhase(phaseDeadline time.Time, stopFlag *int32) {
+	for time.Now().Before(phaseDeadline) {
+		if atomic.LoadInt32(stopFlag) == 1 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func runOneWayPhase(cfg *Config, t *Task, helloMode string, mbps int, phaseDeadline time.Time, stopFlag *int32, totalUp, totalDown *int64) bool {
+	duration := time.Until(phaseDeadline)
+	if duration <= 0 {
+		return true
+	}
+	conn, err := openTaskConn(cfg, t, helloMode, mbps, duration)
+	if err != nil {
+		log.Printf("dial %s error: %v", helloMode, err)
+		return false
+	}
+	defer conn.Close()
+
+	shouldStop := func() bool {
+		return time.Now().After(phaseDeadline) || atomic.LoadInt32(stopFlag) == 1
 	}
 
+	switch helloMode {
+	case "upload":
+		pacedUpload(conn, mbps, shouldStop, totalUp)
+	case "download":
+		readCount(conn, shouldStop, totalDown)
+	default:
+		return false
+	}
+	return true
+}
+
+func scaledRate(base int, minRatio, maxRatio float64) int {
+	if base <= 0 {
+		return 0
+	}
+	if maxRatio < minRatio {
+		maxRatio = minRatio
+	}
+	ratio := minRatio
+	if maxRatio > minRatio {
+		ratio += mrand.Float64() * (maxRatio - minRatio)
+	}
+	rate := int(float64(base) * ratio)
+	if rate <= 0 {
+		rate = 1
+	}
+	if rate > base {
+		rate = base
+	}
+	return rate
+}
+
+func phaseDuration(remain time.Duration, minSec, maxSec int) time.Duration {
+	if remain <= 0 {
+		return 0
+	}
+	if maxSec < minSec {
+		maxSec = minSec
+	}
+	sec := minSec
+	if maxSec > minSec {
+		sec += mrand.Intn(maxSec-minSec+1)
+	}
+	d := time.Duration(sec) * time.Second
+	if d > remain {
+		return remain
+	}
+	return d
+}
+
+func runTraditionalMode(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) string {
+	remain := time.Until(deadline)
+	if remain <= 0 {
+		return "done"
+	}
 	shouldStop := func() bool {
 		return time.Now().After(deadline) || atomic.LoadInt32(stopFlag) == 1
 	}
 
-	switch t.Mode {
-	case "upload":
-		up := pacedUpload(conn, t.UpMbps, shouldStop, totalUp)
-		_ = up
-		if atomic.LoadInt32(stopFlag) == 1 {
-			return *totalUp, *totalDown, "stopped"
+	if t.UpMbps <= 0 && t.DownMbps <= 0 {
+		waitForPhase(deadline, stopFlag)
+	} else if t.UpMbps <= 0 {
+		if !runOneWayPhase(cfg, t, "download", t.DownMbps, deadline, stopFlag, totalUp, totalDown) {
+			return "connfail"
 		}
-		if time.Now().After(deadline) {
-			return *totalUp, *totalDown, "done"
+	} else if t.DownMbps <= 0 {
+		if !runOneWayPhase(cfg, t, "upload", t.UpMbps, deadline, stopFlag, totalUp, totalDown) {
+			return "connfail"
 		}
-		return *totalUp, *totalDown, "connfail"
+	} else {
+		upConn, err := openTaskConn(cfg, t, "upload", t.UpMbps, remain)
+		if err != nil {
+			log.Printf("dial upload error: %v", err)
+			return "connfail"
+		}
+		defer upConn.Close()
 
-	case "download":
-		down := readCount(conn, shouldStop, totalDown)
-		_ = down
-		if atomic.LoadInt32(stopFlag) == 1 {
-			return *totalUp, *totalDown, "stopped"
+		downConn, err := openTaskConn(cfg, t, "download", t.DownMbps, remain)
+		if err != nil {
+			log.Printf("dial download error: %v", err)
+			return "connfail"
 		}
-		if time.Now().After(deadline) {
-			return *totalUp, *totalDown, "done"
-		}
-		return *totalUp, *totalDown, "connfail"
+		defer downConn.Close()
 
-	case "both":
-		conn2, err2 := net.DialTimeout("tcp", t.DataAddr, 10*time.Second)
-		if err2 != nil {
-			log.Printf("dial2 error: %v", err2)
-			up := pacedUpload(conn, t.UpMbps, shouldStop, totalUp)
-			_ = up
-			if atomic.LoadInt32(stopFlag) == 1 {
-				return *totalUp, *totalDown, "stopped"
-			}
-			if time.Now().After(deadline) {
-				return *totalUp, *totalDown, "done"
-			}
-			return *totalUp, *totalDown, "connfail"
-		}
-		defer conn2.Close()
-		hello2, _ := json.Marshal(DataHello{
-			ClientID:    cfg.ClientID,
-			ClientToken: cfg.ClientToken,
-			TaskID:      t.ID,
-			Mode:        "download",
-			DurationSec: t.DurationSec,
-		})
-		helloStr2 := string(hello2) + "\n"
-		reqHeader2 := fmt.Sprintf("POST /api/video/download HTTP/1.1\r\nHost: cdn-local.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", len(helloStr2))
-		if _, err := conn2.Write(append([]byte(reqHeader2), []byte(helloStr2)...)); err != nil {
-			return *totalUp, *totalDown, "connfail"
-		}
 		done := make(chan struct{})
 		go func() {
-			readCount(conn2, shouldStop, totalDown)
+			readCount(downConn, shouldStop, totalDown)
 			close(done)
 		}()
-		pacedUpload(conn, t.UpMbps, shouldStop, totalUp)
+		pacedUpload(upConn, t.UpMbps, shouldStop, totalUp)
 		<-done
-		if atomic.LoadInt32(stopFlag) == 1 {
-			return *totalUp, *totalDown, "stopped"
-		}
+	}
+
+	if atomic.LoadInt32(stopFlag) == 1 {
+		return "stopped"
+	}
+	if time.Now().After(deadline) {
+		return "done"
+	}
+	return "connfail"
+}
+
+func runProfileMode(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) string {
+	for {
 		if time.Now().After(deadline) {
-			return *totalUp, *totalDown, "done"
+			return "done"
 		}
-		return *totalUp, *totalDown, "connfail"
+		if atomic.LoadInt32(stopFlag) == 1 {
+			return "stopped"
+		}
+
+		remain := time.Until(deadline)
+		switch normalizeTaskMode(t.Mode) {
+		case "browse":
+			if t.UpMbps > 0 {
+				phase := time.Now().Add(phaseDuration(remain, 2, 4))
+				if !runOneWayPhase(cfg, t, "upload", scaledRate(t.UpMbps, 0.05, 0.18), phase, stopFlag, totalUp, totalDown) {
+					return "connfail"
+				}
+			}
+			if atomic.LoadInt32(stopFlag) == 1 || time.Now().After(deadline) {
+				continue
+			}
+			if t.DownMbps > 0 {
+				phase := time.Now().Add(phaseDuration(time.Until(deadline), 5, 12))
+				if !runOneWayPhase(cfg, t, "download", scaledRate(t.DownMbps, 0.55, 0.95), phase, stopFlag, totalUp, totalDown) {
+					return "connfail"
+				}
+			}
+			waitForPhase(time.Now().Add(phaseDuration(time.Until(deadline), 2, 7)), stopFlag)
+		case "stream":
+			if t.DownMbps > 0 {
+				phase := time.Now().Add(phaseDuration(remain, 10, 24))
+				if !runOneWayPhase(cfg, t, "download", scaledRate(t.DownMbps, 0.75, 1.0), phase, stopFlag, totalUp, totalDown) {
+					return "connfail"
+				}
+			}
+			if atomic.LoadInt32(stopFlag) == 1 || time.Now().After(deadline) {
+				continue
+			}
+			if t.UpMbps > 0 {
+				phase := time.Now().Add(phaseDuration(time.Until(deadline), 1, 3))
+				if !runOneWayPhase(cfg, t, "upload", scaledRate(t.UpMbps, 0.03, 0.12), phase, stopFlag, totalUp, totalDown) {
+					return "connfail"
+				}
+			}
+			waitForPhase(time.Now().Add(phaseDuration(time.Until(deadline), 1, 4)), stopFlag)
+		case "backup":
+			if t.UpMbps > 0 {
+				phase := time.Now().Add(phaseDuration(remain, 8, 20))
+				if !runOneWayPhase(cfg, t, "upload", scaledRate(t.UpMbps, 0.7, 1.0), phase, stopFlag, totalUp, totalDown) {
+					return "connfail"
+				}
+			}
+			if atomic.LoadInt32(stopFlag) == 1 || time.Now().After(deadline) {
+				continue
+			}
+			if t.DownMbps > 0 {
+				phase := time.Now().Add(phaseDuration(time.Until(deadline), 1, 3))
+				if !runOneWayPhase(cfg, t, "download", scaledRate(t.DownMbps, 0.03, 0.1), phase, stopFlag, totalUp, totalDown) {
+					return "connfail"
+				}
+			}
+			waitForPhase(time.Now().Add(phaseDuration(time.Until(deadline), 2, 6)), stopFlag)
+		default:
+			return "failed"
+		}
+	}
+}
+
+// runTaskOnce attempts a single connection/profile run and runs until done/stopped/error.
+// totalUp/totalDown are the running accumulators (passed in, updated in place).
+func runTaskOnce(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) (int64, int64, string) {
+	switch normalizeTaskMode(t.Mode) {
+	case "upload":
+		if !runOneWayPhase(cfg, t, "upload", t.UpMbps, deadline, stopFlag, totalUp, totalDown) {
+			return *totalUp, *totalDown, "connfail"
+		}
+	case "download":
+		if !runOneWayPhase(cfg, t, "download", t.DownMbps, deadline, stopFlag, totalUp, totalDown) {
+			return *totalUp, *totalDown, "connfail"
+		}
+	case "traditional":
+		return *totalUp, *totalDown, runTraditionalMode(cfg, t, deadline, stopFlag, totalUp, totalDown)
+	case "browse", "stream", "backup":
+		return *totalUp, *totalDown, runProfileMode(cfg, t, deadline, stopFlag, totalUp, totalDown)
 	default:
 		return *totalUp, *totalDown, "failed"
 	}
+
+	if atomic.LoadInt32(stopFlag) == 1 {
+		return *totalUp, *totalDown, "stopped"
+	}
+	if time.Now().After(deadline) {
+		return *totalUp, *totalDown, "done"
+	}
+	return *totalUp, *totalDown, "connfail"
 }
 
 func pacedUpload(w io.Writer, mbps int, stop func() bool, counter *int64) int64 {
@@ -798,20 +958,45 @@ func collectSSHLogEntriesSince(since time.Time) ([]sshLogEntry, error) {
 }
 
 func readSSHJournalEntriesSince(since time.Time) ([]sshLogEntry, error) {
-	cmd := exec.Command("journalctl",
-		"--no-pager",
-		"--since", since.Format(time.RFC3339),
-		"-o", "short-iso",
-		"SYSLOG_IDENTIFIER=sshd",
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return nil, err
+	commands := [][]string{
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "SYSLOG_IDENTIFIER=sshd"},
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "-t", "sshd"},
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "-u", "ssh.service"},
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "-u", "sshd.service"},
 	}
-	return parseSSHLogOutput(string(out), since, time.Now()), nil
+
+	combined := make(map[string]sshLogEntry)
+	var errs []string
+	now := time.Now()
+	for _, args := range commands {
+		cmd := exec.Command("journalctl", args...)
+		out, err := cmd.Output()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				errs = append(errs, fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(ee.Stderr))))
+			} else {
+				errs = append(errs, err.Error())
+			}
+			continue
+		}
+		for _, entry := range parseSSHLogOutput(string(out), since, now) {
+			combined[entry.Timestamp.UTC().Format(time.RFC3339Nano)+"|"+entry.Message] = entry
+		}
+	}
+
+	if len(combined) == 0 {
+		if len(errs) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+
+	out := make([]sshLogEntry, 0, len(combined))
+	for _, entry := range combined {
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
+	return out, nil
 }
 
 func readSSHFileEntriesSince(since time.Time) ([]sshLogEntry, error) {
@@ -912,6 +1097,8 @@ func isSSHFailedAttemptMessage(msg string) bool {
 	case strings.Contains(lower, "failed password for"):
 		return true
 	case strings.Contains(lower, "failed publickey for"):
+		return true
+	case strings.Contains(lower, "failed none for"):
 		return true
 	case strings.Contains(lower, "failed keyboard-interactive"):
 		return true

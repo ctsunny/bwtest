@@ -189,6 +189,7 @@ func TestIsSSHFailedAttemptMessage(t *testing.T) {
 		want bool
 	}{
 		{"Failed password for invalid user test from 198.51.100.7 port 55222 ssh2", true},
+		{"Failed none for invalid user admin from 198.51.100.8 port 55222 ssh2", true},
 		{"error: maximum authentication attempts exceeded for root from 198.51.100.7 port 55222 ssh2 [preauth]", true},
 		{"Accepted password for root from 198.51.100.7 port 55222 ssh2", false},
 	}
@@ -196,6 +197,19 @@ func TestIsSSHFailedAttemptMessage(t *testing.T) {
 	for _, tc := range tests {
 		if got := isSSHFailedAttemptMessage(tc.msg); got != tc.want {
 			t.Fatalf("isSSHFailedAttemptMessage(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeTaskMode(t *testing.T) {
+	tests := map[string]string{
+		"both":        "traditional",
+		"traditional": "traditional",
+		"browse":      "browse",
+	}
+	for in, want := range tests {
+		if got := normalizeTaskMode(in); got != want {
+			t.Fatalf("normalizeTaskMode(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
