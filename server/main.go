@@ -65,6 +65,7 @@ type Task struct {
 	UpMbps        int
 	DownMbps      int
 	DurationSec   int
+	Density       int // 0=continuous, 30=30% idle, 70=70% idle
 	Status        string
 	CreatedAt     string
 	StartedAt     string
@@ -115,6 +116,7 @@ type AssignResp struct {
 	UpMbps      int    `json:"up_mbps"`
 	DownMbps    int    `json:"down_mbps"`
 	DurationSec int    `json:"duration_sec"`
+	Density     int    `json:"density"`
 	DataAddr    string `json:"data_addr"`
 }
 
@@ -169,6 +171,17 @@ func taskModeLabel(mode string) string {
 		return label
 	}
 	return mode
+}
+
+func densityLabel(d int) string {
+	switch d {
+	case 30:
+		return "30% 间歇"
+	case 70:
+		return "70% 间歇"
+	default:
+		return "无间歇"
+	}
 }
 
 // ── SSE Broker ────────────────────────────────────────────────────────────────
@@ -524,6 +537,7 @@ func mustInitDB(path string) *sql.DB {
 			logs TEXT NOT NULL DEFAULT ''
 		);`,
 		`ALTER TABLE tasks ADD COLUMN logs TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE tasks ADD COLUMN density INTEGER NOT NULL DEFAULT 0;`,
 		// Indexes for common query patterns.
 		`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_client_id ON tasks(client_id);`,
@@ -808,9 +822,9 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			if taskStatus(db, currentTask) == "running" {
 				var rt Task
 				err = db.QueryRow(`
-					SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,started_at
+					SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,started_at
 					FROM tasks WHERE id=?`, currentTask).
-					Scan(&rt.ID, &rt.ClientID, &rt.Mode, &rt.UpMbps, &rt.DownMbps, &rt.DurationSec, &rt.StartedAt)
+					Scan(&rt.ID, &rt.ClientID, &rt.Mode, &rt.UpMbps, &rt.DownMbps, &rt.DurationSec, &rt.Density, &rt.StartedAt)
 				if err == nil && rt.StartedAt != "" {
 					started, _ := time.Parse(time.RFC3339, rt.StartedAt)
 					elapsed := int(time.Since(started).Seconds())
@@ -821,7 +835,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 						}
 						_ = json.NewEncoder(w).Encode(AssignResp{
 							ID: rt.ID, Mode: rt.Mode, UpMbps: rt.UpMbps, DownMbps: rt.DownMbps,
-							DurationSec: rt.DurationSec - elapsed, DataAddr: addr,
+							DurationSec: rt.DurationSec - elapsed, Density: rt.Density, DataAddr: addr,
 						})
 						return
 					}
@@ -839,10 +853,10 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		}
 		var t Task
 		err = db.QueryRow(`
-			SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at
+			SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at
 			FROM tasks WHERE client_id=? AND status='pending'
 			ORDER BY created_at ASC LIMIT 1`, clientID).
-			Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Status, &t.CreatedAt)
+			Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt)
 		if err == sql.ErrNoRows {
 			w.WriteHeader(204)
 			return
@@ -866,7 +880,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		}
 		_ = json.NewEncoder(w).Encode(AssignResp{
 			ID: t.ID, Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
-			DurationSec: t.DurationSec, DataAddr: addr,
+			DurationSec: t.DurationSec, Density: t.Density, DataAddr: addr,
 		})
 	}
 }
@@ -989,6 +1003,7 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			UpMbps        int     `json:"up_mbps"`
 			DownMbps      int     `json:"down_mbps"`
 			DurationSec   int     `json:"duration_sec"`
+			Density       int     `json:"density"`
 			Status        string  `json:"status"`
 			StartedAt     string  `json:"started_at"`
 			FinishedAt    string  `json:"finished_at"`
@@ -1016,7 +1031,7 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				ID: t.ID, ClientID: t.ClientID,
 				ClientName: clientNames[t.ClientID],
 				Mode:       t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
-				DurationSec: t.DurationSec, Status: t.Status,
+				DurationSec: t.DurationSec, Density: t.Density, Status: t.Status,
 				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 				UploadGB:      float64(t.UploadBytes) / (1024 * 1024 * 1024),
 				DownloadGB:    float64(t.DownloadBytes) / (1024 * 1024 * 1024),
@@ -1474,6 +1489,33 @@ input:focus, select:focus, textarea:focus {
 .dur-wrap { display: flex; gap: 6px; }
 .dur-wrap input { flex: 1; }
 .dur-wrap select { width: auto; min-width: 72px; flex-shrink: 0; }
+/* ── Task form layout ── */
+.task-form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; align-items: flex-start; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.density-wrap { display: flex; flex-direction: column; gap: 6px; }
+.density-opt {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 6px 10px; border-radius: var(--r-sm); border: 1.5px solid var(--bdr);
+  background: var(--surf); transition: border-color .15s, box-shadow .15s, background .15s;
+  font-size: 12px;
+}
+.density-opt:hover { border-color: var(--primary); background: var(--primary-glow); }
+.density-opt input[type="radio"] { accent-color: var(--primary); margin: 0; }
+.density-opt:has(input:checked) {
+  border-color: var(--primary); background: var(--primary-glow);
+  box-shadow: 0 0 0 2px var(--primary-glow);
+}
+.density-label { font-weight: 600; white-space: nowrap; }
+.quick-bar {
+  margin-top: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding-top: 14px; border-top: 1px solid var(--bdr);
+}
+@media (max-width: 768px) {
+  .task-form-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 480px) {
+  .task-form-grid { grid-template-columns: 1fr; }
+}
 /* ── Toolbar ── */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; align-items: center; justify-content: space-between; }
 /* ── Misc ── */
@@ -1750,10 +1792,10 @@ input:focus, select:focus, textarea:focus {
     </div>
   </div>
   <form id="taskForm" method="post" action="{{.PanelPath}}/task/create">
-    <div class="grid">
-      <div>
+    <div class="task-form-grid">
+      <div class="form-group">
         <label class="note">模式</label>
-        <select name="mode" style="margin-top:4px">
+        <select name="mode">
           <option value="upload">上传</option>
           <option value="download">下载</option>
           <option value="traditional">传统</option>
@@ -1762,17 +1804,17 @@ input:focus, select:focus, textarea:focus {
           <option value="backup">备份同步</option>
         </select>
       </div>
-      <div>
+      <div class="form-group">
         <label class="note">上传 Mbps</label>
-        <input name="up_mbps" value="1" style="margin-top:4px">
+        <input name="up_mbps" value="1">
       </div>
-      <div>
+      <div class="form-group">
         <label class="note">下载 Mbps</label>
-        <input name="down_mbps" value="1" style="margin-top:4px">
+        <input name="down_mbps" value="1">
       </div>
-      <div>
+      <div class="form-group">
         <label class="note">时长</label>
-        <div class="dur-wrap" style="margin-top:4px">
+        <div class="dur-wrap">
           <input name="duration_val" value="1" type="number" min="1">
           <select name="duration_unit">
             <option value="sec">秒</option>
@@ -1783,20 +1825,28 @@ input:focus, select:focus, textarea:focus {
           </select>
         </div>
       </div>
-      <div style="align-self:end">
-        <button type="submit" id="createTaskBtn" style="width:100%">创建任务</button>
+      <div class="form-group">
+        <label class="note">密度</label>
+        <div class="density-wrap">
+          <label class="density-opt" for="density-0" title="无间歇，全程持续运行"><input type="radio" name="density" id="density-0" value="0" checked><span class="density-label">🔴 无间歇</span></label>
+          <label class="density-opt" for="density-30" title="30% 时间随机暂停"><input type="radio" name="density" id="density-30" value="30"><span class="density-label">🟡 30% 间歇</span></label>
+          <label class="density-opt" for="density-70" title="70% 时间随机暂停"><input type="radio" name="density" id="density-70" value="70"><span class="density-label">🟢 70% 间歇</span></label>
+        </div>
+      </div>
+      <div class="form-group" style="align-self:end">
+        <button type="submit" id="createTaskBtn" style="width:100%">🚀 创建任务</button>
       </div>
     </div>
   </form>
-  <div class="tip">提示：先在上方客户端列表勾选目标服务器，可同时下发任务给多个客户端。</div>
-  <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--bdr)">
+  <div class="tip">💡 提示：先在上方客户端列表勾选目标服务器，可同时下发任务给多个客户端。密度选项控制任务运行时的间歇比例。</div>
+  <div class="quick-bar">
     <span class="note" style="font-weight:700">⚡ 快速测速:</span>
-    <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (1M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="download">📥 1min 下载 (1M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="traditional">🔄 1min 传统 (1M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="browse">🌐 1min 网页 (1M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="stream">🎬 1min 流媒体 (1M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="backup">💾 1min 备份 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 上传</button>
+    <button type="button" class="sec flash-test-btn" data-mode="download">📥 下载</button>
+    <button type="button" class="sec flash-test-btn" data-mode="traditional">🔄 传统</button>
+    <button type="button" class="sec flash-test-btn" data-mode="browse">🌐 网页</button>
+    <button type="button" class="sec flash-test-btn" data-mode="stream">🎬 流媒体</button>
+    <button type="button" class="sec flash-test-btn" data-mode="backup">💾 备份</button>
   </div>
 </div>
 
@@ -1810,7 +1860,7 @@ input:focus, select:focus, textarea:focus {
   </div>
   <div class="tbl-wrap">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>状态</th><th>进度</th><th>延迟</th><th>已传</th><th>已拉</th><th>日期</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>密度</th><th>状态</th><th>进度</th><th>延迟</th><th>已传</th><th>已拉</th><th>日期</th><th>操作</th></tr></thead>
     <tbody id="runningTaskBody">
     {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
@@ -1819,6 +1869,7 @@ input:focus, select:focus, textarea:focus {
       <td data-label="上传">{{.UpMbps}}</td>
       <td data-label="下载">{{.DownMbps}}</td>
       <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
+      <td data-label="密度">{{densityLabel .Density}}</td>
       <td data-label="状态"><span class="badge {{.Status}}">{{.Status}}</span></td>
       <td data-label="进度" class="progress-col">{{buildProgressHTML .}}</td>
       <td data-label="延迟" class="rtt-col" data-client-id="{{.ClientID}}">-</td>
@@ -1835,7 +1886,7 @@ input:focus, select:focus, textarea:focus {
       </td>
     </tr>
     {{end}}
-    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="12" style="text-align:center;color:var(--tx3);padding:48px 20px">
+    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="13" style="text-align:center;color:var(--tx3);padding:48px 20px">
       <div style="font-size:30px;margin-bottom:8px;opacity:.35">⚡</div>
       <div style="font-size:14px">暂无正在执行的任务</div>
     </td></tr>{{end}}
@@ -1857,7 +1908,7 @@ input:focus, select:focus, textarea:focus {
   </div>
   <div class="tbl-wrap">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>状态</th><th>已传</th><th>已拉</th><th>开始</th><th>结束</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>密度</th><th>状态</th><th>已传</th><th>已拉</th><th>开始</th><th>结束</th><th>操作</th></tr></thead>
     <tbody id="historyTaskBody">
     {{range .HistoryTasks}}
     <tr data-task-id="{{.ID}}">
@@ -1866,6 +1917,7 @@ input:focus, select:focus, textarea:focus {
       <td data-label="上传">{{.UpMbps}}</td>
       <td data-label="下载">{{.DownMbps}}</td>
       <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
+      <td data-label="密度">{{densityLabel .Density}}</td>
       <td data-label="状态"><span class="badge {{.Status}}">{{.Status}}</span></td>
       <td data-label="已传">{{printf "%.3f" (divf .UploadBytes 1073741824)}} GB</td>
       <td data-label="已拉">{{printf "%.3f" (divf .DownloadBytes 1073741824)}} GB</td>
@@ -1875,12 +1927,12 @@ input:focus, select:focus, textarea:focus {
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           <button type="button" class="info view-logs-btn" data-task-id="{{.ID}}">📄 日志</button>
           <button type="button" class="danger del-task-btn" data-task-id="{{.ID}}">🗑 删除</button>
-          <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}">🔄 克隆</button>
+          <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}">🔄 克隆</button>
         </div>
       </td>
     </tr>
     {{end}}
-    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--tx3);padding:48px 20px">
+    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="12" style="text-align:center;color:var(--tx3);padding:48px 20px">
       <div style="font-size:30px;margin-bottom:8px;opacity:.35">📋</div>
       <div style="font-size:14px">暂无历史记录</div>
     </td></tr>{{end}}
@@ -2032,6 +2084,12 @@ function modeLabel(mode) {
       return mode || '-';
   }
 }
+function densityLbl(d) {
+  d = parseInt(d) || 0;
+  if (d === 30) return '30% 间歇';
+  if (d === 70) return '70% 间歇';
+  return '无间歇';
+}
 function renderPing(lat, lastSeen) {
   if (!lastSeen) return { text: '?', cls: 'ping-warn' };
   var t = new Date(lastSeen);
@@ -2114,6 +2172,7 @@ function buildRunningRow(t) {
     + '<td data-label="上传">' + t.up_mbps + '</td>'
     + '<td data-label="下载">' + t.down_mbps + '</td>'
     + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
+    + '<td data-label="密度">' + densityLbl(t.density) + '</td>'
     + '<td data-label="状态"><span class="badge ' + t.status + '">' + t.status + '</span></td>'
     + '<td data-label="进度" class="progress-col">' + buildProgress(t) + '</td>'
     + '<td data-label="网络" class="rtt-col" data-client-id="' + t.client_id + '">-</td>'
@@ -2136,6 +2195,7 @@ function buildHistoryRow(t) {
     + '<td data-label="上传">' + t.up_mbps + '</td>'
     + '<td data-label="下载">' + t.down_mbps + '</td>'
     + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
+    + '<td data-label="密度">' + densityLbl(t.density) + '</td>'
     + '<td data-label="状态"><span class="badge ' + t.status + '">' + t.status + '</span></td>'
     + '<td data-label="已传">' + fmtGB(t.upload_bytes) + '</td>'
     + '<td data-label="已拉">' + fmtGB(t.download_bytes) + '</td>'
@@ -2144,7 +2204,7 @@ function buildHistoryRow(t) {
     + '<td data-label="操作"><div style="display:flex;gap:4px;flex-wrap:wrap">'
     + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
     + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
-    + '<button type="button" class="sec clone-btn" data-id="'+t.id+'" data-client="'+t.client_id+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'">🔄 克隆</button>'
+    + '<button type="button" class="sec clone-btn" data-id="'+t.id+'" data-client="'+t.client_id+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'">🔄 克隆</button>'
     + '</div></td>'
     + '</tr>';
 }
@@ -2446,6 +2506,9 @@ delegate('historyTaskBody', 'clone-btn', function(target) {
     document.querySelector('input[name="down_mbps"]').value = target.dataset.down;
     document.querySelector('input[name="duration_val"]').value = target.dataset.dur;
     document.querySelector('select[name="duration_unit"]').value = 'sec';
+    var densityVal = target.dataset.density || '0';
+    var densityRadio = document.querySelector('input[name="density"][value="' + densityVal + '"]');
+    if (densityRadio) densityRadio.checked = true;
     var form = document.querySelector('form[action$="/task/create"]');
     if (form) window.scrollTo({ top: form.offsetTop - 100, behavior: 'smooth' });
 });
@@ -2578,6 +2641,8 @@ document.querySelectorAll('.flash-test-btn').forEach(function(b) {
     document.querySelector('input[name="down_mbps"]').value = '1';
     document.querySelector('input[name="duration_val"]').value = '1';
     document.querySelector('select[name="duration_unit"]').value = 'min';
+    var dr = document.querySelector('input[name="density"][value="0"]');
+    if (dr) dr.checked = true;
     taskForm.dispatchEvent(new Event('submit'));
   });
 });
@@ -2602,7 +2667,8 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			"divf": func(a int64, b float64) float64 {
 				return float64(a) / b
 			},
-			"modeLabel": taskModeLabel,
+			"modeLabel":     taskModeLabel,
+			"densityLabel":  densityLabel,
 			"shortTime": func(s string) string {
 				if s == "" {
 					return ""
@@ -2924,6 +2990,7 @@ func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker)
 		durVal, _ := strconv.Atoi(r.Form.Get("duration_val"))
 		durUnit := r.Form.Get("duration_unit")
 		dur := durationToSec(durVal, durUnit)
+		density, _ := strconv.Atoi(r.Form.Get("density"))
 
 		// ── Input validation ──────────────────────────────────────────────────
 		const maxMbps = 100000 // 100 Gbps upper bound
@@ -2947,14 +3014,17 @@ func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker)
 			http.Error(w, fmt.Sprintf("duration out of range [%ds, %ds]", minDurSec, maxDurSec), http.StatusBadRequest)
 			return
 		}
+		if density != 0 && density != 30 && density != 70 {
+			density = 0
+		}
 		// ──────────────────────────────────────────────────────────────────────
 
 		now := time.Now().Format(time.RFC3339)
 
 		for _, clientID := range clientIDs {
 			id := genToken(8)
-			_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-				id, clientID, mode, up, down, dur, "pending", now)
+			_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+				id, clientID, mode, up, down, dur, density, "pending", now)
 			if err == nil {
 				clientName := clientID
 				_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
@@ -3074,7 +3144,7 @@ func mustClients(db *sql.DB) []Client {
 }
 
 func mustTasks(db *sql.DB) []Task {
-	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,status,created_at,started_at,finished_at,upload_bytes,download_bytes,logs FROM tasks`)
+	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,started_at,finished_at,upload_bytes,download_bytes,logs FROM tasks`)
 	if err != nil {
 		return nil
 	}
@@ -3082,7 +3152,7 @@ func mustTasks(db *sql.DB) []Task {
 	var out []Task
 	for rows.Next() {
 		var t Task
-		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs)
+		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs)
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
