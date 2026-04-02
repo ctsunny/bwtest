@@ -547,18 +547,20 @@ func scaledRate(base int, minRatio, maxRatio float64) int {
 	if base <= 0 {
 		return 0
 	}
-	if minRatio < 0 {
-		minRatio = 0
+	minBound := minRatio
+	maxBound := maxRatio
+	if minBound < 0 {
+		minBound = 0
 	}
-	if maxRatio > 1 {
-		maxRatio = 1
+	if maxBound > 1 {
+		maxBound = 1
 	}
-	if maxRatio < minRatio {
-		maxRatio = minRatio
+	if maxBound < minBound {
+		maxBound = minBound
 	}
-	ratio := minRatio
-	if maxRatio > minRatio {
-		ratio += mrand.Float64() * (maxRatio - minRatio)
+	ratio := minBound
+	if maxBound > minBound {
+		ratio += mrand.Float64() * (maxBound - minBound)
 	}
 	rate := int(float64(base) * ratio)
 	if rate <= 0 {
