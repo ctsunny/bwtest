@@ -480,6 +480,10 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 }
 
 func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Duration) (net.Conn, error) {
+	rateMbps := 0
+	if mode == "download" {
+		rateMbps = mbps
+	}
 	conn, err := net.DialTimeout("tcp", t.DataAddr, 10*time.Second)
 	if err != nil {
 		return nil, err
@@ -489,7 +493,7 @@ func openTaskConn(cfg *Config, t *Task, mode string, mbps int, duration time.Dur
 		ClientToken: cfg.ClientToken,
 		TaskID:      t.ID,
 		Mode:        mode,
-		RateMbps:    mbps,
+		RateMbps:    rateMbps,
 		DurationSec: max(1, int(duration.Seconds())),
 	})
 	helloStr := string(hello) + "\n"
@@ -540,6 +544,12 @@ func runOneWayPhase(cfg *Config, t *Task, helloMode string, mbps int, phaseDeadl
 func scaledRate(base int, minRatio, maxRatio float64) int {
 	if base <= 0 {
 		return 0
+	}
+	if minRatio < 0 {
+		minRatio = 0
+	}
+	if maxRatio > 1 {
+		maxRatio = 1
 	}
 	if maxRatio < minRatio {
 		maxRatio = minRatio
