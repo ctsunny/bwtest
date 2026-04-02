@@ -136,7 +136,39 @@ type DataHello struct {
 	ClientToken string `json:"client_token"`
 	TaskID      string `json:"task_id"`
 	Mode        string `json:"mode"`
+	RateMbps    int    `json:"rate_mbps,omitempty"`
 	DurationSec int    `json:"duration_sec"`
+}
+
+var taskModeLabels = map[string]string{
+	"upload":      "上传",
+	"download":    "下载",
+	"both":        "传统",
+	"traditional": "传统",
+	"browse":      "网页浏览",
+	"stream":      "流媒体",
+	"backup":      "备份同步",
+}
+
+func normalizeTaskMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "both":
+		return "traditional"
+	default:
+		return strings.TrimSpace(mode)
+	}
+}
+
+func isValidTaskMode(mode string) bool {
+	_, ok := taskModeLabels[normalizeTaskMode(mode)]
+	return ok
+}
+
+func taskModeLabel(mode string) string {
+	if label, ok := taskModeLabels[normalizeTaskMode(mode)]; ok {
+		return label
+	}
+	return mode
 }
 
 // ── SSE Broker ────────────────────────────────────────────────────────────────
@@ -564,18 +596,22 @@ func handleDataConn(db *sql.DB, conn net.Conn) {
 	if effMode == "" {
 		effMode = mode
 	}
+	effDownMbps := downMbps
+	if hello.RateMbps > 0 && hello.RateMbps < effDownMbps {
+		effDownMbps = hello.RateMbps
+	}
 	switch effMode {
 	case "upload":
 		readDiscardLoop(conn, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
 	case "download":
-		_ = pacedWrite(conn, downMbps, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
-	case "both":
+		_ = pacedWrite(conn, effDownMbps, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
+	case "both", "traditional":
 		done := make(chan struct{})
 		go func() {
 			readDiscardLoop(conn, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
 			close(done)
 		}()
-		_ = pacedWrite(conn, downMbps, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
+		_ = pacedWrite(conn, effDownMbps, deadline, func() bool { return taskStatus(db, hello.TaskID) == "running" })
 		<-done
 	}
 }
@@ -823,7 +859,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
 		go barkPush(cfg.BarkURL, "任务开始",
 			fmt.Sprintf("客户端 %s 开始执行任务\n模式:%s 上传:%dMbps 下载:%dMbps 时长:%ds",
-				clientName, t.Mode, t.UpMbps, t.DownMbps, t.DurationSec))
+				clientName, taskModeLabel(t.Mode), t.UpMbps, t.DownMbps, t.DurationSec))
 		addr := cfg.DataAddr
 		if strings.HasPrefix(addr, ":") {
 			addr = cfg.ServerHost + addr
@@ -1720,7 +1756,10 @@ input:focus, select:focus, textarea:focus {
         <select name="mode" style="margin-top:4px">
           <option value="upload">上传</option>
           <option value="download">下载</option>
-          <option value="both">双向</option>
+          <option value="traditional">传统</option>
+          <option value="browse">网页浏览</option>
+          <option value="stream">流媒体</option>
+          <option value="backup">备份同步</option>
         </select>
       </div>
       <div>
@@ -1754,7 +1793,10 @@ input:focus, select:focus, textarea:focus {
     <span class="note" style="font-weight:700">⚡ 快速测速:</span>
     <button type="button" class="sec flash-test-btn" data-mode="upload">🚀 1min 上传 (1M)</button>
     <button type="button" class="sec flash-test-btn" data-mode="download">📥 1min 下载 (1M)</button>
-    <button type="button" class="sec flash-test-btn" data-mode="both">🔄 1min 双向 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="traditional">🔄 1min 传统 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="browse">🌐 1min 网页 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="stream">🎬 1min 流媒体 (1M)</button>
+    <button type="button" class="sec flash-test-btn" data-mode="backup">💾 1min 备份 (1M)</button>
   </div>
 </div>
 
@@ -1773,7 +1815,7 @@ input:focus, select:focus, textarea:focus {
     {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
       <td data-label="客户端">{{index $.ClientNames .ClientID}}</td>
-      <td data-label="模式">{{.Mode}}</td>
+      <td data-label="模式">{{modeLabel .Mode}}</td>
       <td data-label="上传">{{.UpMbps}}</td>
       <td data-label="下载">{{.DownMbps}}</td>
       <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
@@ -1820,7 +1862,7 @@ input:focus, select:focus, textarea:focus {
     {{range .HistoryTasks}}
     <tr data-task-id="{{.ID}}">
       <td data-label="客户端">{{index $.ClientNames .ClientID}}</td>
-      <td data-label="模式">{{.Mode}}</td>
+      <td data-label="模式">{{modeLabel .Mode}}</td>
       <td data-label="上传">{{.UpMbps}}</td>
       <td data-label="下载">{{.DownMbps}}</td>
       <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
@@ -1971,6 +2013,25 @@ function fmtGB(bytes) {
   if (!bytes || bytes === 0) return '0.000 GB';
   return (bytes / 1073741824).toFixed(3) + ' GB';
 }
+function modeLabel(mode) {
+  switch (mode) {
+    case 'upload':
+      return '上传';
+    case 'download':
+      return '下载';
+    case 'both':
+    case 'traditional':
+      return '传统';
+    case 'browse':
+      return '网页浏览';
+    case 'stream':
+      return '流媒体';
+    case 'backup':
+      return '备份同步';
+    default:
+      return mode || '-';
+  }
+}
 function renderPing(lat, lastSeen) {
   if (!lastSeen) return { text: '?', cls: 'ping-warn' };
   var t = new Date(lastSeen);
@@ -2049,7 +2110,7 @@ function buildRunningRow(t) {
   
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td data-label="客户端">' + name + '</td>'
-    + '<td data-label="模式">' + t.mode + '</td>'
+    + '<td data-label="模式">' + modeLabel(t.mode) + '</td>'
     + '<td data-label="上传">' + t.up_mbps + '</td>'
     + '<td data-label="下载">' + t.down_mbps + '</td>'
     + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
@@ -2071,7 +2132,7 @@ function buildHistoryRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
   return '<tr data-task-id="' + t.id + '">'
     + '<td data-label="客户端">' + name + '</td>'
-    + '<td data-label="模式">' + t.mode + '</td>'
+    + '<td data-label="模式">' + modeLabel(t.mode) + '</td>'
     + '<td data-label="上传">' + t.up_mbps + '</td>'
     + '<td data-label="下载">' + t.down_mbps + '</td>'
     + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
@@ -2541,6 +2602,7 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			"divf": func(a int64, b float64) float64 {
 				return float64(a) / b
 			},
+			"modeLabel": taskModeLabel,
 			"shortTime": func(s string) string {
 				if s == "" {
 					return ""
@@ -2868,8 +2930,9 @@ func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker)
 		const minDurSec = 5
 		const maxDurSec = 86400 * 30 // 30 days
 
-		if mode != "upload" && mode != "download" && mode != "both" {
-			http.Error(w, "invalid mode: must be upload, download, or both", http.StatusBadRequest)
+		mode = normalizeTaskMode(mode)
+		if !isValidTaskMode(mode) {
+			http.Error(w, "invalid mode", http.StatusBadRequest)
 			return
 		}
 		if up < 0 || up > maxMbps {

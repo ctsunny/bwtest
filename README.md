@@ -6,7 +6,7 @@ A lightweight Linux bandwidth test panel and agent.
 
 - Server-side web panel (HTTP Basic Auth)
 - Client approval workflow
-- Upload / download / both task modes
+- Upload / download / traditional / browse / stream / backup task modes
 - Configurable speed (Mbps) and duration (seconds)
 - SQLite persistence (no external DB required)
 - SSE live refresh in the panel
@@ -55,7 +55,7 @@ sudo bash -s -- \
 3. Click **Approve** to allow the client to receive tasks.
 4. Fill in the **Create Task** form:
    - `client_id`: copy from the Clients table
-   - `mode`: `upload` / `download` / `both`
+   - `mode`: `upload` / `download` / `traditional` / `browse` / `stream` / `backup`
    - `up_mbps` / `down_mbps`: speed limit in Mbps
    - `duration_sec`: how many seconds to run
 5. Click **Create Task**. The panel auto-refreshes via SSE.
