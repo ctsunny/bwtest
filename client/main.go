@@ -567,7 +567,7 @@ func phaseDuration(remain time.Duration, minSec, maxSec int) time.Duration {
 	}
 	sec := minSec
 	if maxSec > minSec {
-		sec += mrand.Intn(maxSec-minSec+1)
+		sec += mrand.Intn(maxSec - minSec + 1)
 	}
 	d := time.Duration(sec) * time.Second
 	if d > remain {
