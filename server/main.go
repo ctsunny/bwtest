@@ -2675,7 +2675,6 @@ if (dsab) dsab.addEventListener('click', function() {
 var clientSelectAllToggle = document.getElementById('clientSelectAllToggle');
 if (clientSelectAllToggle) clientSelectAllToggle.addEventListener('change', function() {
   getTaskClientCheckboxes().forEach(function(cb) { cb.checked = clientSelectAllToggle.checked; });
-  syncClientSelectAllToggle();
 });
 var clientBodyEl = document.getElementById('clientBody');
 if (clientBodyEl) clientBodyEl.addEventListener('change', function(e) {
@@ -3145,24 +3144,69 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().Format(time.RFC3339)
-		rows, err := db.Query(`SELECT id, status, client_id FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var taskID, status, clientID string
-				if err := rows.Scan(&taskID, &status, &clientID); err != nil {
-					continue
+		type stopTaskItem struct {
+			id       string
+			status   string
+			clientID string
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "failed to begin transaction", http.StatusInternalServerError)
+			return
+		}
+		rows, err := tx.Query(`SELECT id, status, client_id FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
+		if err != nil {
+			_ = tx.Rollback()
+			http.Error(w, "failed to query tasks", http.StatusInternalServerError)
+			return
+		}
+		var items []stopTaskItem
+		defer rows.Close()
+		for rows.Next() {
+			var taskID, status, clientID string
+			if err := rows.Scan(&taskID, &status, &clientID); err != nil {
+				_ = tx.Rollback()
+				http.Error(w, "failed to scan task row", http.StatusInternalServerError)
+				return
+			}
+			items = append(items, stopTaskItem{id: taskID, status: status, clientID: clientID})
+		}
+		if err := rows.Err(); err != nil {
+			_ = tx.Rollback()
+			http.Error(w, "failed to iterate tasks", http.StatusInternalServerError)
+			return
+		}
+		if err := rows.Close(); err != nil {
+			_ = tx.Rollback()
+			http.Error(w, "failed to close task query", http.StatusInternalServerError)
+			return
+		}
+		for _, item := range items {
+			switch item.status {
+			case "running":
+				if _, err := tx.Exec(`UPDATE tasks SET status='stopping' WHERE id=?`, item.id); err != nil {
+					_ = tx.Rollback()
+					http.Error(w, "failed to update running task", http.StatusInternalServerError)
+					return
 				}
-				switch status {
-				case "running":
-					_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=?`, taskID)
-				case "pending", "stopping":
-					_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, taskID)
-					if clientID != "" {
-						_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
+			case "pending", "stopping":
+				if _, err := tx.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, item.id); err != nil {
+					_ = tx.Rollback()
+					http.Error(w, "failed to stop queued task", http.StatusInternalServerError)
+					return
+				}
+				if item.clientID != "" {
+					if _, err := tx.Exec(`UPDATE clients SET current_task='' WHERE id=?`, item.clientID); err != nil {
+						_ = tx.Rollback()
+						http.Error(w, "failed to clear client task", http.StatusInternalServerError)
+						return
 					}
 				}
 			}
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "failed to commit task updates", http.StatusInternalServerError)
+			return
 		}
 		broker.Publish("tasks")
 		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
