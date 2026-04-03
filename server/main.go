@@ -3153,14 +3153,13 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 			http.Error(w, "failed to begin transaction", http.StatusInternalServerError)
 			return
 		}
-		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
+		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending')`)
 		if err != nil {
 			_ = tx.Rollback()
 			http.Error(w, "failed to query tasks", http.StatusInternalServerError)
 			return
 		}
 		var items []stopTaskItem
-		defer rows.Close()
 		for rows.Next() {
 			var taskID, status, clientID, createdAt, startedAt string
 			if err := rows.Scan(&taskID, &status, &clientID, &createdAt, &startedAt); err != nil {
