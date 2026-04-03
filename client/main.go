@@ -256,8 +256,9 @@ func heartbeatLoop(cfg *Config) {
 	var lastLatency int
 	for range tk.C {
 		var resp struct {
-			OK        bool   `json:"ok"`
-			UpgradeTo string `json:"upgrade_to"`
+			OK               bool   `json:"ok"`
+			UpgradeTo        string `json:"upgrade_to"`
+			RestartRequested bool   `json:"restart_requested"`
 		}
 		ver := Version
 		if ver == "" {
@@ -288,6 +289,10 @@ func heartbeatLoop(cfg *Config) {
 				log.Printf("[upgrade] 服务端要求升级到 %s，当前版本 %s，开始自动升级...", resp.UpgradeTo, ver)
 				go selfUpgrade(resp.UpgradeTo)
 			}
+		}
+		if resp.RestartRequested {
+			log.Printf("[restart] 服务端要求重启 bwagent 服务")
+			go restartAgentService("restart")
 		}
 	}
 }
@@ -1510,11 +1515,12 @@ func selfUpgrade(version string) {
 
 	// 延迟 1 秒确保当前心跳响应已处理完毕
 	time.Sleep(time.Second)
+	restartAgentService("upgrade")
+}
 
-	// 优先尝试 sudo systemctl restart（需要 sudoers 配置）
-	// 如果无权限则直接 Exit(0) — systemd Restart=always 会自动重新拉起
+func restartAgentService(reason string) {
 	if err := exec.Command("sudo", "-n", "systemctl", "restart", "bwagent").Run(); err != nil {
-		log.Printf("[upgrade] sudo systemctl restart 不可用(%v)，通过 os.Exit(0) 触发 systemd respawn", err)
+		log.Printf("[%s] sudo systemctl restart 不可用(%v)，通过 os.Exit(0) 触发 systemd respawn", reason, err)
 	}
 	os.Exit(0)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -451,5 +452,106 @@ func TestHandleStopAllTasks(t *testing.T) {
 	}
 	if runningClientTask != "task-running" {
 		t.Fatalf("c2 current_task = %q, want task-running", runningClientTask)
+	}
+}
+
+func TestHandleCreateTaskScheduledAndRetry(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	now := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	_, err := db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c1", "node-1", "", "secret", 1, time.Now().Format(time.RFC3339), "127.0.0.1", "", "v1")
+	if err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+
+	form := "client_id=c1&mode=upload&up_mbps=10&down_mbps=0&duration_val=5&duration_unit=min&density=30&max_retries=2&scheduled_at=" + url.QueryEscape(now) + "&template_name=" + url.QueryEscape("nightly")
+	req := httptest.NewRequest(http.MethodPost, "/admin/task/create", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+
+	handleCreateTask("/admin", &Config{}, db, NewBroker()).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleCreateTask status = %d, want 200", w.Code)
+	}
+
+	var status, scheduledAt, templateName string
+	var maxRetries int
+	if err := db.QueryRow(`SELECT status, scheduled_at, max_retries, template_name FROM tasks LIMIT 1`).Scan(&status, &scheduledAt, &maxRetries, &templateName); err != nil {
+		t.Fatalf("query task: %v", err)
+	}
+	if status != "scheduled" {
+		t.Fatalf("status = %q, want scheduled", status)
+	}
+	if scheduledAt != now {
+		t.Fatalf("scheduled_at = %q, want %q", scheduledAt, now)
+	}
+	if maxRetries != 2 {
+		t.Fatalf("max_retries = %d, want 2", maxRetries)
+	}
+	if templateName != "nightly" {
+		t.Fatalf("template_name = %q, want nightly", templateName)
+	}
+}
+
+func TestHandleBulkRestartClients(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	_, err := db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c1", "node-1", "", "secret", 1, time.Now().Format(time.RFC3339), "127.0.0.1", "", "v1")
+	if err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/client/bulk-restart", strings.NewReader("client_ids=c1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handleBulkRestartClients("/admin", db, NewBroker()).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleBulkRestartClients status = %d, want 200", w.Code)
+	}
+
+	hbBody := `{"client_id":"c1","client_token":"secret","version":"v1","latency":1,"ssh_attempts":0}`
+	hbReq := httptest.NewRequest(http.MethodPost, "/api/heartbeat", strings.NewReader(hbBody))
+	hbReq.RemoteAddr = "127.0.0.1:12345"
+	hbW := httptest.NewRecorder()
+	handleHeartbeat(db).ServeHTTP(hbW, hbReq)
+	if hbW.Code != http.StatusOK {
+		t.Fatalf("handleHeartbeat status = %d, want 200", hbW.Code)
+	}
+	if !strings.Contains(hbW.Body.String(), `"restart_requested":true`) {
+		t.Fatalf("expected restart_requested=true in heartbeat response, got %s", hbW.Body.String())
+	}
+	var restartRequested int
+	if err := db.QueryRow(`SELECT restart_requested FROM clients WHERE id='c1'`).Scan(&restartRequested); err != nil {
+		t.Fatalf("query restart_requested: %v", err)
+	}
+	if restartRequested != 0 {
+		t.Fatalf("restart_requested = %d, want 0", restartRequested)
+	}
+}
+
+func TestMaybeRetryTaskCreatesFollowup(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,max_retries,retry_count,template_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"t1", "c1", "upload", 10, 0, 60, 0, "stopped", now, 2, 0, "tpl")
+	if err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	if !maybeRetryTask(db, "t1", now) {
+		t.Fatal("expected maybeRetryTask to create follow-up task")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE parent_task_id='t1' AND retry_count=1 AND status='pending'`).Scan(&count); err != nil {
+		t.Fatalf("count retry tasks: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("retry task count = %d, want 1", count)
 	}
 }

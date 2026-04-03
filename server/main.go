@@ -45,17 +45,20 @@ type Config struct {
 }
 
 type Client struct {
-	ID          string
-	Name        string
-	Remark      string
-	Approved    bool
-	LastSeen    string
-	RemoteIP    string
-	CurrentTask string
-	UpgradeTo   string
-	Version     string
-	Latency     int
-	SSHAttempts int
+	ID               string
+	Name             string
+	Remark           string
+	GroupName        string
+	Tags             string
+	Approved         bool
+	LastSeen         string
+	RemoteIP         string
+	CurrentTask      string
+	UpgradeTo        string
+	Version          string
+	Latency          int
+	SSHAttempts      int
+	RestartRequested bool
 }
 
 type Task struct {
@@ -70,9 +73,26 @@ type Task struct {
 	CreatedAt     string
 	StartedAt     string
 	FinishedAt    string
+	ScheduledAt   string
 	UploadBytes   int64
 	DownloadBytes int64
 	Logs          string
+	MaxRetries    int
+	RetryCount    int
+	ParentTaskID  string
+	TemplateName  string
+}
+
+type TaskTemplate struct {
+	ID          string
+	Name        string
+	Mode        string
+	UpMbps      int
+	DownMbps    int
+	DurationSec int
+	Density     int
+	MaxRetries  int
+	CreatedAt   string
 }
 
 type RegisterReq struct {
@@ -399,6 +419,7 @@ func main() {
 
 	go runDataServer(cfg, db)
 	go watchStuckTasks(db, broker)
+	go watchScheduledTasks(db, broker)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", jsonHandler(handleRegister(&cfg, db, broker)))
@@ -416,10 +437,13 @@ func main() {
 	mux.Handle(p+"/client/edit", basicAuth(cfg, http.HandlerFunc(handleClientEdit(p, db, broker))))
 	mux.Handle(p+"/client/upgrade", basicAuth(cfg, http.HandlerFunc(handlePushUpgrade(p, db))))
 	mux.Handle(p+"/client/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteClient(p, db, broker))))
+	mux.Handle(p+"/client/bulk-delete", basicAuth(cfg, http.HandlerFunc(handleBulkDeleteClients(p, db, broker))))
+	mux.Handle(p+"/client/bulk-restart", basicAuth(cfg, http.HandlerFunc(handleBulkRestartClients(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, &cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/stop-all", basicAuth(cfg, http.HandlerFunc(handleStopAllTasks(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
+	mux.Handle(p+"/task/template/save", basicAuth(cfg, http.HandlerFunc(handleSaveTaskTemplate(p, db))))
 	mux.Handle(p+"/task/logs", basicAuth(cfg, http.HandlerFunc(handleGetTaskLogs(db))))
 	mux.Handle(p+"/task/clear-history", basicAuth(cfg, http.HandlerFunc(handleClearHistory(p, db, broker))))
 	mux.Handle(p+"/gen/install-cmd", basicAuth(cfg, http.HandlerFunc(handleGenInstallCmd(p, &cfg))))
@@ -488,12 +512,45 @@ func watchStuckTasks(db *sql.DB, broker *Broker) {
 			now := time.Now().Format(time.RFC3339)
 			_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, p.tid)
 			_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, p.cid)
+			maybeRetryTask(db, p.tid, now)
 			log.Printf("watchStuckTasks: mark task %s (client %s) stopped due to heartbeat timeout", p.tid, p.cid)
 		}
 		if len(pairs) > 0 {
 			broker.Publish("tasks")
 		}
 	}
+}
+
+func watchScheduledTasks(db *sql.DB, broker *Broker) {
+	tk := time.NewTicker(5 * time.Second)
+	defer tk.Stop()
+	for range tk.C {
+		now := time.Now().Format(time.RFC3339)
+		res, err := db.Exec(`UPDATE tasks SET status='pending' WHERE status='scheduled' AND scheduled_at<>'' AND scheduled_at<=?`, now)
+		if err != nil {
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			broker.Publish("tasks")
+		}
+	}
+}
+
+func maybeRetryTask(db *sql.DB, taskID, now string) bool {
+	var t Task
+	err := db.QueryRow(`SELECT id, client_id, mode, up_mbps, down_mbps, duration_sec, density, max_retries, retry_count, parent_task_id, template_name FROM tasks WHERE id=?`, taskID).
+		Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.MaxRetries, &t.RetryCount, &t.ParentTaskID, &t.TemplateName)
+	if err != nil || t.MaxRetries <= t.RetryCount {
+		return false
+	}
+	newID := genToken(8)
+	parentID := t.ParentTaskID
+	if parentID == "" {
+		parentID = t.ID
+	}
+	_, err = db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,scheduled_at,max_retries,retry_count,parent_task_id,template_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		newID, t.ClientID, t.Mode, t.UpMbps, t.DownMbps, t.DurationSec, t.Density, "pending", now, "", t.MaxRetries, t.RetryCount+1, parentID, t.TemplateName)
+	return err == nil
 }
 
 // ── Database / Schema ─────────────────────────────────────────────────────────
@@ -522,6 +579,9 @@ func mustInitDB(path string) *sql.DB {
 		`ALTER TABLE clients ADD COLUMN version TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE clients ADD COLUMN latency INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE clients ADD COLUMN ssh_attempts INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE clients ADD COLUMN group_name TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE clients ADD COLUMN tags TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE clients ADD COLUMN restart_requested INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS tasks(
 			id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
@@ -539,6 +599,22 @@ func mustInitDB(path string) *sql.DB {
 		);`,
 		`ALTER TABLE tasks ADD COLUMN logs TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE tasks ADD COLUMN density INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE tasks ADD COLUMN scheduled_at TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE tasks ADD COLUMN template_name TEXT NOT NULL DEFAULT '';`,
+		`CREATE TABLE IF NOT EXISTS task_templates(
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			up_mbps INTEGER NOT NULL,
+			down_mbps INTEGER NOT NULL,
+			duration_sec INTEGER NOT NULL,
+			density INTEGER NOT NULL DEFAULT 0,
+			max_retries INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL
+		);`,
 		// Indexes for common query patterns.
 		`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_client_id ON tasks(client_id);`,
@@ -760,13 +836,17 @@ func handleHeartbeat(db *sql.DB) http.HandlerFunc {
 		}
 		// 读取 upgrade_to，然后原子清除，保证只下发一次
 		var upgradeTo string
-		_ = db.QueryRow(`SELECT upgrade_to FROM clients WHERE id=?`, req.ClientID).Scan(&upgradeTo)
+		var restartRequested int
+		_ = db.QueryRow(`SELECT upgrade_to,restart_requested FROM clients WHERE id=?`, req.ClientID).Scan(&upgradeTo, &restartRequested)
 		if upgradeTo != "" {
 			_, _ = db.Exec(`UPDATE clients SET upgrade_to='' WHERE id=?`, req.ClientID)
 		}
+		if restartRequested == 1 {
+			_, _ = db.Exec(`UPDATE clients SET restart_requested=0 WHERE id=?`, req.ClientID)
+		}
 		_, _ = db.Exec(`UPDATE clients SET last_seen=?, remote_ip=?, version=?, latency=?, ssh_attempts=? WHERE id=?`,
 			time.Now().Format(time.RFC3339), realIP(r), req.Version, req.Latency, req.SSHAttempts, req.ClientID)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upgrade_to": upgradeTo})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upgrade_to": upgradeTo, "restart_requested": restartRequested == 1})
 	}
 }
 
@@ -913,9 +993,13 @@ func handleTaskResult(cfg *Config, db *sql.DB, broker *Broker) http.HandlerFunc 
 		} else if status == "stopping" {
 			finalStatus = "stopped"
 		}
+		now := time.Now().Format(time.RFC3339)
 		_, _ = db.Exec(`UPDATE tasks SET status=?, finished_at=?, upload_bytes=?, download_bytes=?, logs=? WHERE id=?`,
-			finalStatus, time.Now().Format(time.RFC3339), req.UploadBytes, req.DownloadBytes, req.Logs, req.TaskID)
+			finalStatus, now, req.UploadBytes, req.DownloadBytes, req.Logs, req.TaskID)
 		_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, req.ClientID)
+		if status == "running" && finalStatus == "stopped" {
+			_ = maybeRetryTask(db, req.TaskID, now)
+		}
 		broker.Publish("tasks")
 		clientName := req.ClientID
 		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, req.ClientID).Scan(&clientName)
@@ -986,15 +1070,18 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 		clients := mustClients(db)
 		tasks := mustTasks(db)
 		type clientJSON struct {
-			ID          string `json:"id"`
-			Name        string `json:"name"`
-			Remark      string `json:"remark"`
-			Approved    bool   `json:"approved"`
-			LastSeen    string `json:"last_seen"`
-			RemoteIP    string `json:"remote_ip"`
-			CurrentTask string `json:"current_task"`
-			Latency     int    `json:"latency"`
-			SSHAttempts int    `json:"ssh_attempts"`
+			ID               string `json:"id"`
+			Name             string `json:"name"`
+			Remark           string `json:"remark"`
+			GroupName        string `json:"group_name"`
+			Tags             string `json:"tags"`
+			Approved         bool   `json:"approved"`
+			LastSeen         string `json:"last_seen"`
+			RemoteIP         string `json:"remote_ip"`
+			CurrentTask      string `json:"current_task"`
+			Latency          int    `json:"latency"`
+			SSHAttempts      int    `json:"ssh_attempts"`
+			RestartRequested bool   `json:"restart_requested"`
 		}
 		type taskJSON struct {
 			ID            string  `json:"id"`
@@ -1008,11 +1095,20 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			Status        string  `json:"status"`
 			StartedAt     string  `json:"started_at"`
 			FinishedAt    string  `json:"finished_at"`
+			ScheduledAt   string  `json:"scheduled_at"`
 			UploadGB      float64 `json:"upload_gb"`
 			DownloadGB    float64 `json:"download_gb"`
 			UploadBytes   int64   `json:"upload_bytes"`
 			DownloadBytes int64   `json:"download_bytes"`
+			MaxRetries    int     `json:"max_retries"`
+			RetryCount    int     `json:"retry_count"`
+			ParentTaskID  string  `json:"parent_task_id"`
+			TemplateName  string  `json:"template_name"`
 		}
+		statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+		modeFilter := normalizeTaskMode(strings.TrimSpace(r.URL.Query().Get("mode")))
+		clientFilter := strings.TrimSpace(r.URL.Query().Get("client_id"))
+		search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 		clientNames := map[string]string{}
 		for _, c := range clients {
 			clientNames[c.ID] = c.Name
@@ -1020,24 +1116,41 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 		cj := make([]clientJSON, 0, len(clients))
 		for _, c := range clients {
 			cj = append(cj, clientJSON{
-				ID: c.ID, Name: c.Name, Remark: c.Remark,
+				ID: c.ID, Name: c.Name, Remark: c.Remark, GroupName: c.GroupName, Tags: c.Tags,
 				Approved: c.Approved, LastSeen: c.LastSeen,
 				RemoteIP: c.RemoteIP, CurrentTask: c.CurrentTask,
-				Latency: c.Latency, SSHAttempts: c.SSHAttempts,
+				Latency: c.Latency, SSHAttempts: c.SSHAttempts, RestartRequested: c.RestartRequested,
 			})
 		}
 		tj := make([]taskJSON, 0, len(tasks))
 		for _, t := range tasks {
+			clientName := clientNames[t.ClientID]
+			if statusFilter != "" && t.Status != statusFilter {
+				continue
+			}
+			if modeFilter != "" && t.Mode != modeFilter {
+				continue
+			}
+			if clientFilter != "" && t.ClientID != clientFilter {
+				continue
+			}
+			if search != "" {
+				haystack := strings.ToLower(strings.Join([]string{t.ID, clientName, t.ClientID, t.Mode, t.Status, t.TemplateName}, " "))
+				if !strings.Contains(haystack, search) {
+					continue
+				}
+			}
 			tj = append(tj, taskJSON{
 				ID: t.ID, ClientID: t.ClientID,
-				ClientName: clientNames[t.ClientID],
+				ClientName: clientName,
 				Mode:       t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
 				DurationSec: t.DurationSec, Density: t.Density, Status: t.Status,
-				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
+				StartedAt: t.StartedAt, FinishedAt: t.FinishedAt, ScheduledAt: t.ScheduledAt,
 				UploadGB:      float64(t.UploadBytes) / (1024 * 1024 * 1024),
 				DownloadGB:    float64(t.DownloadBytes) / (1024 * 1024 * 1024),
 				UploadBytes:   t.UploadBytes,
 				DownloadBytes: t.DownloadBytes,
+				MaxRetries:    t.MaxRetries, RetryCount: t.RetryCount, ParentTaskID: t.ParentTaskID, TemplateName: t.TemplateName,
 			})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"clients": cj, "tasks": tj})
@@ -1251,6 +1364,7 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 			Clients              []Client
 			RunningTasks         []Task
 			HistoryTasks         []Task
+			TaskTemplates        []TaskTemplate
 			ApprovedClients      []approvedClient
 			CancellableTaskCount int
 			DefaultClientID      string
@@ -1263,6 +1377,7 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 			PanelPathJS          template.JS
 			InitTokenJS          template.JS
 			VersionJS            template.JS
+			TemplatesJS          template.JS
 			GenName              string
 			GenRemark            string
 			GenVersion           string
@@ -1272,6 +1387,7 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 		var approvedClients []approvedClient
 		defaultClientID := ""
 		clientNames := map[string]string{}
+		templates := mustTaskTemplates(db)
 		for _, c := range clients {
 			clientNames[c.ID] = c.Name
 			if c.Approved {
@@ -1704,6 +1820,14 @@ input:focus, select:focus, textarea:focus {
       <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">备注</label>
       <textarea id="editRemark" placeholder="备注（可选）" rows="3"></textarea>
     </div>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">分组</label>
+      <input id="editGroupName" placeholder="例如：香港 / 美国 / 核心节点">
+    </div>
+    <div style="margin-bottom:18px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">标签</label>
+      <input id="editTags" placeholder="例如：CN2,优选,高防">
+    </div>
     <div style="display:flex;gap:8px">
       <button type="button" id="saveEditBtn">保存</button>
       <button type="button" class="sec" id="closeEditBtn">取消</button>
@@ -1753,22 +1877,25 @@ input:focus, select:focus, textarea:focus {
     <div class="card-hd-right" style="font-size:12px">
       <button type="button" class="sec" id="selectAllClientsBtn">全选任务目标</button>
       <button type="button" class="sec" id="deselectAllClientsBtn">清空选择</button>
+      <button type="button" class="warn" id="bulkRestartClientsBtn">批量重启客户端</button>
+      <button type="button" class="danger" id="bulkDeleteClientsBtn">批量删除客户端</button>
     </div>
   </div>
   <div class="tbl-wrap">
   <table>
     <thead><tr>
       <th><label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:inherit;font-size:inherit;font-weight:inherit;cursor:pointer"><input type="checkbox" id="clientSelectAllToggle" aria-label="全选服务器" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">全选</label></th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
-      <th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
+      <th>分组/标签</th><th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
     </tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
-    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-latency="{{.Latency}}" data-ssh-attempts="{{.SSHAttempts}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
+    <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-group-name="{{.GroupName}}" data-tags="{{.Tags}}" data-latency="{{.Latency}}" data-ssh-attempts="{{.SSHAttempts}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
       <td data-label="选择" class="select-col">{{if .Approved}}<input type="checkbox" class="task-client-checkbox" value="{{.ID}}" aria-label="选择客户端 {{.Name}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">{{else}}-{{end}}</td>
       <td data-label="名称" class="name-col"><strong style="font-weight:600">{{.Name}}</strong></td>
       <td data-label="版本"><code style="font-size:11px;background:var(--surf2);padding:2px 7px;border-radius:5px;border:1px solid var(--bdr);font-family:monospace">{{.Version}}</code></td>
       <td data-label="备注" class="remark-col" style="color:var(--tx2)">{{.Remark}}</td>
       <td data-label="批准" class="approve-col">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
+      <td data-label="分组/标签" class="group-tags-col" style="color:var(--tx2)">{{if .GroupName}}<div>📁 {{.GroupName}}</div>{{end}}{{if .Tags}}<div>🏷 {{.Tags}}</div>{{end}}</td>
       <td data-label="延迟" class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
       <td data-label="SSH尝试" class="sshattempt-col">{{.SSHAttempts}}</td>
       <td data-label="心跳" class="lastseen-col" style="color:var(--tx3);font-size:12px">{{.LastSeen | shortTime}}</td>
@@ -1777,7 +1904,7 @@ input:focus, select:focus, textarea:focus {
       <td data-label="操作">
         <div class="client-actions" style="display:flex;gap:5px;flex-wrap:wrap">
           {{if (not .Approved)}}<button type="button" class="approve-btn" data-id="{{.ID}}" style="background:var(--ok)">批准</button>{{end}}
-          <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}">编辑</button>
+          <button type="button" class="sec edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-group-name="{{.GroupName}}" data-tags="{{.Tags}}">编辑</button>
           <button type="button" class="info upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">升级码</button>
           <button type="button" class="warn push-upgrade-btn" data-id="{{.ID}}" data-name="{{.Name}}">推送</button>
           <button type="button" class="danger del-client-btn" data-id="{{.ID}}">删除</button>
@@ -1796,6 +1923,13 @@ input:focus, select:focus, textarea:focus {
     <div class="card-hd-left">
       <div class="h2-icon">➕</div>
       <h2>创建任务</h2>
+    </div>
+    <div class="card-hd-right" style="font-size:12px">
+      <select id="templateSelect">
+        <option value="">加载任务模板</option>
+        {{range .TaskTemplates}}<option value="{{.ID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-duration="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}">{{.Name}}</option>{{end}}
+      </select>
+      <button type="button" class="sec" id="saveTemplateBtn">💾 保存模板</button>
     </div>
   </div>
   <form id="taskForm" method="post" action="{{.PanelPath}}/task/create">
@@ -1840,6 +1974,19 @@ input:focus, select:focus, textarea:focus {
           <label class="density-opt" for="density-70" title="70% 时间随机暂停"><input type="radio" name="density" id="density-70" value="70"><span class="density-label">🟢 70% 间歇</span></label>
         </div>
       </div>
+      <div class="form-group">
+        <label class="note">失败自动重试</label>
+        <input name="max_retries" value="0" type="number" min="0" max="10">
+      </div>
+      <div class="form-group">
+        <label class="note">定时执行</label>
+        <input id="scheduledAtInput" type="datetime-local">
+        <input type="hidden" name="scheduled_at" id="scheduledAtRFC3339">
+      </div>
+      <div class="form-group">
+        <label class="note">模板标识</label>
+        <input name="template_name" id="templateNameInput" placeholder="可选模板名">
+      </div>
       <div class="form-group" style="align-self:end">
         <button type="submit" id="createTaskBtn" style="width:100%">🚀 创建任务</button>
       </div>
@@ -1867,6 +2014,12 @@ input:focus, select:focus, textarea:focus {
     <div class="card-hd-right">
       <button type="button" class="warn" id="stopAllTasksBtn" data-count="{{.CancellableTaskCount}}" {{if eq .CancellableTaskCount 0}}disabled{{end}}>{{if gt .CancellableTaskCount 0}}✖ 一键取消全部 ({{.CancellableTaskCount}}){{else}}✖ 一键取消全部{{end}}</button>
     </div>
+  </div>
+  <div class="toolbar" style="margin-bottom:14px">
+    <input id="taskSearchInput" placeholder="搜索任务ID / 客户端 / 模式 / 模板">
+    <select id="taskStatusFilter"><option value="">全部状态</option><option value="scheduled">scheduled</option><option value="pending">pending</option><option value="running">running</option><option value="stopping">stopping</option><option value="stopped">stopped</option><option value="done">done</option></select>
+    <select id="taskModeFilter"><option value="">全部模式</option><option value="upload">upload</option><option value="download">download</option><option value="traditional">traditional</option><option value="browse">browse</option><option value="stream">stream</option><option value="backup">backup</option></select>
+    <select id="taskClientFilter"><option value="">全部客户端</option>{{range .ApprovedClients}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>
   </div>
   <div class="tbl-wrap">
   <table>
@@ -1937,7 +2090,8 @@ input:focus, select:focus, textarea:focus {
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           <button type="button" class="info view-logs-btn" data-task-id="{{.ID}}">📄 日志</button>
           <button type="button" class="danger del-task-btn" data-task-id="{{.ID}}">🗑 删除</button>
-          <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}">🔄 克隆</button>
+          <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">🔄 克隆</button>
+          <button type="button" class="sec save-template-row-btn" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">💾 模板</button>
         </div>
       </td>
     </tr>
@@ -1959,6 +2113,7 @@ var PANEL_PATH = {{.PanelPathJS}};
 var INIT_TOKEN  = {{.InitTokenJS}};
 var PANEL_ADDR  = location.host;
 var VERSION     = {{.VersionJS}};
+var TASK_TEMPLATES = {{.TemplatesJS}};
 var FAST_POLL_INTERVAL_MS = 5000;
 var IDLE_POLL_INTERVAL_MS = 15000;
 
@@ -1982,6 +2137,12 @@ function apiFetch(path, body) {
 function bindClick(id, fn) {
   var el = document.getElementById(id);
   if (el) el.addEventListener('click', fn);
+}
+
+function escapeHTML(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+  });
 }
 
 var clientNameMap = {};
@@ -2026,8 +2187,24 @@ function setSelectedClientIDs(ids) {
   syncClientSelectAllToggle();
 }
 
+function selectedClientIDsCSV() {
+  return getSelectedClientIDs().join(',');
+}
+
 function buildTaskRequestBody(form) {
   var params = new URLSearchParams(new FormData(form));
+  var scheduledInput = document.getElementById('scheduledAtInput');
+  var scheduledRFC = document.getElementById('scheduledAtRFC3339');
+  if (scheduledInput && scheduledRFC) {
+    if (scheduledInput.value) {
+      var scheduledDate = new Date(scheduledInput.value);
+      scheduledRFC.value = isNaN(scheduledDate.getTime()) ? '' : scheduledDate.toISOString();
+    } else {
+      scheduledRFC.value = '';
+    }
+    if (scheduledRFC.value) params.set('scheduled_at', scheduledRFC.value);
+    else params.delete('scheduled_at');
+  }
   getSelectedClientIDs().forEach(function(id) {
     params.append('client_id', id);
   });
@@ -2173,6 +2350,15 @@ function fmtDuration(secs) {
   return (secs / 86400).toFixed(1) + ' 天';
 }
 
+function durationToSeconds(val, unit) {
+  var num = parseInt(val, 10) || 0;
+  if (unit === 'min') return num * 60;
+  if (unit === 'hour') return num * 3600;
+  if (unit === 'day') return num * 86400;
+  if (unit === 'month') return num * 86400 * 30;
+  return num;
+}
+
 function buildProgress(t) {
   if (t.status === 'pending') return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:0%%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--muted)">等待中 (0%%)</div>';
   if (t.status !== 'running' && t.status !== 'stopping') return '-';
@@ -2231,7 +2417,8 @@ function buildHistoryRow(t) {
     + '<td data-label="操作"><div style="display:flex;gap:4px;flex-wrap:wrap">'
     + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
     + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
-    + '<button type="button" class="sec clone-btn" data-id="'+t.id+'" data-client="'+t.client_id+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'">🔄 克隆</button>'
+    + '<button type="button" class="sec clone-btn" data-id="'+t.id+'" data-client="'+t.client_id+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
+    + '<button type="button" class="sec save-template-row-btn" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">💾 模板</button>'
     + '</div></td>'
     + '</tr>';
 }
@@ -2255,6 +2442,19 @@ function updateStats(data) {
   if (elRunning) elRunning.textContent = running;
   if (elPending) elPending.textContent = pending;
   if (elTraffic) elTraffic.textContent = fmtGB(totalTraffic);
+}
+
+function getTaskFilters() {
+  var qEl = document.getElementById('taskSearchInput');
+  var statusEl = document.getElementById('taskStatusFilter');
+  var modeEl = document.getElementById('taskModeFilter');
+  var clientEl = document.getElementById('taskClientFilter');
+  return {
+    q: qEl ? qEl.value.trim().toLowerCase() : '',
+    status: statusEl ? statusEl.value : '',
+    mode: modeEl ? modeEl.value : '',
+    clientId: clientEl ? clientEl.value : ''
+  };
 }
 
 function getActiveTasks(tasks) {
@@ -2295,7 +2495,14 @@ function pollData() {
     return;
   }
   pollInFlight = true;
-  fetch('/api/data', {credentials: 'include', cache: 'no-store'})
+  var filters = getTaskFilters();
+  var query = new URLSearchParams();
+  if (filters.q) query.set('q', filters.q);
+  if (filters.status) query.set('status', filters.status);
+  if (filters.mode) query.set('mode', filters.mode);
+  if (filters.clientId) query.set('client_id', filters.clientId);
+  var apiURL = '/api/data' + (query.toString() ? '?' + query.toString() : '');
+  fetch(apiURL, {credentials: 'include', cache: 'no-store'})
     .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function(data) {
       var tasks = data.tasks || [];
@@ -2345,11 +2552,15 @@ function pollData() {
         if (!row) return;
         row.dataset.name = c.name || row.dataset.name || '';
         row.dataset.remark = c.remark || '';
+        row.dataset.groupName = c.group_name || '';
+        row.dataset.tags = c.tags || '';
         if (c.name) clientNameMap[c.id] = c.name;
         var nameCell = row.querySelector('.name-col strong');
         if (nameCell && c.name !== undefined) nameCell.textContent = c.name || c.id;
         var remarkCell = row.querySelector('.remark-col');
         if (remarkCell && c.remark !== undefined) remarkCell.textContent = c.remark || '';
+        var gtCell = row.querySelector('.group-tags-col');
+        if (gtCell) gtCell.innerHTML = (c.group_name ? '<div>📁 ' + escapeHTML(c.group_name) + '</div>' : '') + (c.tags ? '<div>🏷 ' + escapeHTML(c.tags) + '</div>' : '');
         syncClientApprovalUI(row, !!c.approved);
         row.dataset.lastSeen = c.last_seen || '';
         var lsCol = row.querySelector('.lastseen-col');
@@ -2429,9 +2640,12 @@ document.getElementById('closeEditBtn').addEventListener('click', function() {
 });
 
 delegate('clientBody', 'edit-btn', function(target) {
+  var row = target.closest('tr');
   editClientId = target.dataset.id;
-  document.getElementById('editName').value   = target.dataset.name || '';
-  document.getElementById('editRemark').value = target.dataset.remark || '';
+  document.getElementById('editName').value   = (row && row.dataset.name) || target.dataset.name || '';
+  document.getElementById('editRemark').value = (row && row.dataset.remark) || target.dataset.remark || '';
+  document.getElementById('editGroupName').value = (row && row.dataset.groupName) || target.dataset.groupName || '';
+  document.getElementById('editTags').value = (row && row.dataset.tags) || target.dataset.tags || '';
   document.getElementById('editModal').classList.add('open');
 });
 
@@ -2549,6 +2763,9 @@ delegate('historyTaskBody', 'clone-btn', function(target) {
     document.querySelector('input[name="up_mbps"]').value = target.dataset.up;
     document.querySelector('input[name="down_mbps"]').value = target.dataset.down;
     document.querySelector('input[name="duration_val"]').value = target.dataset.dur;
+    document.querySelector('input[name="max_retries"]').value = target.dataset.maxRetries || '0';
+    document.getElementById('templateNameInput').value = target.dataset.templateName || '';
+    document.getElementById('scheduledAtInput').value = '';
     document.querySelector('select[name="duration_unit"]').value = 'sec';
     var densityVal = target.dataset.density || '0';
     var densityRadio = document.querySelector('input[name="density"][value="' + densityVal + '"]');
@@ -2557,16 +2774,72 @@ delegate('historyTaskBody', 'clone-btn', function(target) {
     if (form) window.scrollTo({ top: form.offsetTop - 100, behavior: 'smooth' });
 });
 
+function saveTemplateFromData(data) {
+  var name = prompt('模板名称', data.templateName || '');
+  if (!name) return;
+  apiFetch('/task/template/save',
+    'name=' + encodeURIComponent(name) +
+    '&mode=' + encodeURIComponent(data.mode) +
+    '&up_mbps=' + encodeURIComponent(data.up) +
+    '&down_mbps=' + encodeURIComponent(data.down) +
+    '&duration_sec=' + encodeURIComponent(data.durationSec) +
+    '&density=' + encodeURIComponent(data.density) +
+    '&max_retries=' + encodeURIComponent(data.maxRetries || 0))
+    .then(function(resp) {
+      TASK_TEMPLATES.unshift({
+        id: resp.id,
+        name: name,
+        mode: data.mode,
+        up_mbps: Number(data.up),
+        down_mbps: Number(data.down),
+        duration_sec: Number(data.durationSec),
+        density: Number(data.density),
+        max_retries: Number(data.maxRetries || 0)
+      });
+      var sel = document.getElementById('templateSelect');
+      if (sel) {
+        var opt = document.createElement('option');
+        opt.value = resp.id;
+        opt.textContent = name;
+        opt.dataset.mode = data.mode;
+        opt.dataset.up = data.up;
+        opt.dataset.down = data.down;
+        opt.dataset.duration = data.durationSec;
+        opt.dataset.density = data.density;
+        opt.dataset.maxRetries = data.maxRetries || 0;
+        sel.appendChild(opt);
+      }
+      alert('模板已保存');
+    })
+    .catch(function(err) { alert('保存模板失败: ' + err); });
+}
+
+delegate('historyTaskBody', 'save-template-row-btn', function(target) {
+  saveTemplateFromData({
+    mode: target.dataset.mode,
+    up: target.dataset.up,
+    down: target.dataset.down,
+    durationSec: target.dataset.dur,
+    density: target.dataset.density || '0',
+    maxRetries: target.dataset.maxRetries || '0',
+    templateName: target.dataset.templateName || ''
+  });
+});
+
 document.getElementById('saveEditBtn').addEventListener('click', function() {
   var name   = document.getElementById('editName').value.trim();
   var remark = document.getElementById('editRemark').value.trim();
+  var groupName = document.getElementById('editGroupName').value.trim();
+  var tags = document.getElementById('editTags').value.trim();
   if (!name) { alert('名称不能为空'); return; }
   var saveBtn = document.getElementById('saveEditBtn');
   saveBtn.disabled = true;
   apiFetch('/client/edit',
     'client_id=' + encodeURIComponent(editClientId) +
     '&name='      + encodeURIComponent(name) +
-    '&remark='    + encodeURIComponent(remark))
+    '&remark='    + encodeURIComponent(remark) +
+    '&group_name=' + encodeURIComponent(groupName) +
+    '&tags=' + encodeURIComponent(tags))
     .then(function() {
       document.getElementById('editModal').classList.remove('open');
       pollData();
@@ -2667,6 +2940,36 @@ if (taskForm) taskForm.addEventListener('submit', function(e) {
     .finally(function() { if (btn) btn.disabled = false; });
 });
 
+var templateSelectEl = document.getElementById('templateSelect');
+if (templateSelectEl) templateSelectEl.addEventListener('change', function() {
+  var opt = templateSelectEl.options[templateSelectEl.selectedIndex];
+  if (!opt || !opt.value) return;
+  document.querySelector('select[name="mode"]').value = opt.dataset.mode || 'upload';
+  document.querySelector('input[name="up_mbps"]').value = opt.dataset.up || '1';
+  document.querySelector('input[name="down_mbps"]').value = opt.dataset.down || '1';
+  document.querySelector('input[name="duration_val"]').value = opt.dataset.duration || '60';
+  document.querySelector('select[name="duration_unit"]').value = 'sec';
+  document.querySelector('input[name="max_retries"]').value = opt.dataset.maxRetries || '0';
+  document.getElementById('templateNameInput').value = opt.textContent || '';
+  var densityRadio = document.querySelector('input[name="density"][value="' + (opt.dataset.density || '0') + '"]');
+  if (densityRadio) densityRadio.checked = true;
+});
+bindClick('saveTemplateBtn', function() {
+  saveTemplateFromData({
+    mode: document.querySelector('select[name="mode"]').value,
+    up: document.querySelector('input[name="up_mbps"]').value,
+    down: document.querySelector('input[name="down_mbps"]').value,
+    durationSec: durationToSeconds(document.querySelector('input[name="duration_val"]').value, document.querySelector('select[name="duration_unit"]').value),
+    density: (document.querySelector('input[name="density"]:checked') || {}).value || '0',
+    maxRetries: document.querySelector('input[name="max_retries"]').value || '0',
+    templateName: document.getElementById('templateNameInput').value || ''
+  });
+});
+['taskSearchInput', 'taskStatusFilter', 'taskModeFilter', 'taskClientFilter'].forEach(function(id) {
+  var el = document.getElementById(id);
+  if (el) el.addEventListener(id === 'taskSearchInput' ? 'input' : 'change', function() { pollData(); });
+});
+
 var sab = document.getElementById('selectAllClientsBtn');
 if (sab) sab.addEventListener('click', function() {
   getTaskClientCheckboxes().forEach(function(cb) { cb.checked = true; });
@@ -2703,6 +3006,22 @@ if (stopAllTasksBtn) stopAllTasksBtn.addEventListener('click', function() {
     .then(function() { pollData(); })
     .catch(function(err) { alert('批量取消失败: ' + err); })
     .finally(function() { pollData(); });
+});
+bindClick('bulkRestartClientsBtn', function() {
+  var ids = selectedClientIDsCSV();
+  if (!ids) { alert('请先选择客户端'); return; }
+  if (!confirm('确认批量重启所选客户端服务？')) return;
+  apiFetch('/client/bulk-restart', 'client_ids=' + encodeURIComponent(ids))
+    .then(function() { alert('已下发重启指令，客户端会在下次心跳后重启'); pollData(); })
+    .catch(function(err) { alert('批量重启失败: ' + err); });
+});
+bindClick('bulkDeleteClientsBtn', function() {
+  var ids = selectedClientIDsCSV();
+  if (!ids) { alert('请先选择客户端'); return; }
+  if (!confirm('确认批量删除所选客户端？')) return;
+  apiFetch('/client/bulk-delete', 'client_ids=' + encodeURIComponent(ids))
+    .then(function() { pollData(); })
+    .catch(function(err) { alert('批量删除失败: ' + err); });
 });
 
 document.querySelectorAll('.flash-test-btn').forEach(function(b) {
@@ -2794,6 +3113,7 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			Clients:              clients,
 			RunningTasks:         runningTasks,
 			HistoryTasks:         historyTasks,
+			TaskTemplates:        templates,
 			ApprovedClients:      approvedClients,
 			CancellableTaskCount: cancellableTaskCount,
 			DefaultClientID:      defaultClientID,
@@ -2806,6 +3126,7 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			PanelPathJS:          jsStr(cfg.PanelPath),
 			InitTokenJS:          jsStr(cfg.InitToken),
 			VersionJS:            jsStr(version),
+			TemplatesJS:          template.JS(mustMarshalJSON(templates)),
 			GenName:              genName,
 			GenRemark:            genRemark,
 			GenVersion:           genVersion,
@@ -3041,8 +3362,10 @@ func handleClientEdit(panelPath string, db *sql.DB, broker *Broker) http.Handler
 		clientID := r.Form.Get("client_id")
 		name := strings.TrimSpace(r.Form.Get("name"))
 		remark := strings.TrimSpace(r.Form.Get("remark"))
+		groupName := strings.TrimSpace(r.Form.Get("group_name"))
+		tags := normalizeTags(r.Form.Get("tags"))
 		if name != "" {
-			_, _ = db.Exec(`UPDATE clients SET name=?, remark=? WHERE id=?`, name, remark, clientID)
+			_, _ = db.Exec(`UPDATE clients SET name=?, remark=?, group_name=?, tags=? WHERE id=?`, name, remark, groupName, tags, clientID)
 		}
 		broker.Publish("clients")
 		w.Header().Set("Content-Type", "application/json")
@@ -3065,6 +3388,9 @@ func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker)
 		durUnit := r.Form.Get("duration_unit")
 		dur := durationToSec(durVal, durUnit)
 		density, _ := strconv.Atoi(r.Form.Get("density"))
+		maxRetries, _ := strconv.Atoi(r.Form.Get("max_retries"))
+		scheduledAt := strings.TrimSpace(r.Form.Get("scheduled_at"))
+		templateName := strings.TrimSpace(r.Form.Get("template_name"))
 
 		// ── Input validation ──────────────────────────────────────────────────
 		const maxMbps = 100000 // 100 Gbps upper bound
@@ -3091,14 +3417,25 @@ func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker)
 		if density != 0 && density != 30 && density != 70 {
 			density = 0
 		}
+		if maxRetries < 0 {
+			maxRetries = 0
+		}
+		status := "pending"
+		if scheduledAt != "" {
+			if _, err := time.Parse(time.RFC3339, scheduledAt); err != nil {
+				http.Error(w, "invalid scheduled_at", http.StatusBadRequest)
+				return
+			}
+			status = "scheduled"
+		}
 		// ──────────────────────────────────────────────────────────────────────
 
 		now := time.Now().Format(time.RFC3339)
 
 		for _, clientID := range clientIDs {
 			id := genToken(8)
-			_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-				id, clientID, mode, up, down, dur, density, "pending", now)
+			_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,scheduled_at,max_retries,retry_count,parent_task_id,template_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				id, clientID, mode, up, down, dur, density, status, now, scheduledAt, maxRetries, 0, "", templateName)
 			if err == nil {
 				clientName := clientID
 				_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, clientID).Scan(&clientName)
@@ -3115,6 +3452,33 @@ func handleCreateTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker)
 			return
 		}
 		http.Redirect(w, r, panelPath, http.StatusFound)
+	}
+}
+
+func handleSaveTaskTemplate(panelPath string, db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		name := strings.TrimSpace(r.Form.Get("name"))
+		mode := normalizeTaskMode(r.Form.Get("mode"))
+		up, _ := strconv.Atoi(r.Form.Get("up_mbps"))
+		down, _ := strconv.Atoi(r.Form.Get("down_mbps"))
+		durationSec, _ := strconv.Atoi(r.Form.Get("duration_sec"))
+		density, _ := strconv.Atoi(r.Form.Get("density"))
+		maxRetries, _ := strconv.Atoi(r.Form.Get("max_retries"))
+		if name == "" || !isValidTaskMode(mode) || durationSec <= 0 {
+			http.Error(w, "invalid template payload", http.StatusBadRequest)
+			return
+		}
+		id := genToken(8)
+		now := time.Now().Format(time.RFC3339)
+		_, err := db.Exec(`INSERT INTO task_templates(id,name,mode,up_mbps,down_mbps,duration_sec,density,max_retries,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			id, name, mode, up, down, durationSec, density, maxRetries, now)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
 	}
 }
 
@@ -3268,6 +3632,34 @@ func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func handleBulkDeleteClients(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		clientIDs := splitCSV(r.Form.Get("client_ids"))
+		for _, clientID := range clientIDs {
+			_, _ = db.Exec(`DELETE FROM tasks WHERE client_id=?`, clientID)
+			_, _ = db.Exec(`DELETE FROM clients WHERE id=?`, clientID)
+		}
+		broker.Publish("clients")
+		broker.Publish("tasks")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "count": len(clientIDs)})
+	}
+}
+
+func handleBulkRestartClients(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		clientIDs := splitCSV(r.Form.Get("client_ids"))
+		for _, clientID := range clientIDs {
+			_, _ = db.Exec(`UPDATE clients SET restart_requested=1 WHERE id=?`, clientID)
+		}
+		broker.Publish("clients")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "count": len(clientIDs)})
+	}
+}
+
 func handleDeleteClient(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -3287,7 +3679,7 @@ func handleDeleteClient(panelPath string, db *sql.DB, broker *Broker) http.Handl
 // ── Database Helpers ──────────────────────────────────────────────────────────
 
 func mustClients(db *sql.DB) []Client {
-	rows, err := db.Query(`SELECT id,name,remark,approved,last_seen,remote_ip,current_task,upgrade_to,version,latency,ssh_attempts FROM clients`)
+	rows, err := db.Query(`SELECT id,name,remark,group_name,tags,approved,last_seen,remote_ip,current_task,upgrade_to,version,latency,ssh_attempts,restart_requested FROM clients`)
 	if err != nil {
 		return nil
 	}
@@ -3295,9 +3687,10 @@ func mustClients(db *sql.DB) []Client {
 	var out []Client
 	for rows.Next() {
 		var c Client
-		var approved int
-		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version, &c.Latency, &c.SSHAttempts)
+		var approved, restartRequested int
+		_ = rows.Scan(&c.ID, &c.Name, &c.Remark, &c.GroupName, &c.Tags, &approved, &c.LastSeen, &c.RemoteIP, &c.CurrentTask, &c.UpgradeTo, &c.Version, &c.Latency, &c.SSHAttempts, &restartRequested)
 		c.Approved = approved == 1
+		c.RestartRequested = restartRequested == 1
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen > out[j].LastSeen })
@@ -3305,7 +3698,7 @@ func mustClients(db *sql.DB) []Client {
 }
 
 func mustTasks(db *sql.DB) []Task {
-	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,started_at,finished_at,upload_bytes,download_bytes,logs FROM tasks`)
+	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,started_at,finished_at,scheduled_at,upload_bytes,download_bytes,logs,max_retries,retry_count,parent_task_id,template_name FROM tasks`)
 	if err != nil {
 		return nil
 	}
@@ -3313,10 +3706,25 @@ func mustTasks(db *sql.DB) []Task {
 	var out []Task
 	for rows.Next() {
 		var t Task
-		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs)
+		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.ScheduledAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs, &t.MaxRetries, &t.RetryCount, &t.ParentTaskID, &t.TemplateName)
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out
+}
+
+func mustTaskTemplates(db *sql.DB) []TaskTemplate {
+	rows, err := db.Query(`SELECT id,name,mode,up_mbps,down_mbps,duration_sec,density,max_retries,created_at FROM task_templates ORDER BY created_at DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []TaskTemplate
+	for rows.Next() {
+		var t TaskTemplate
+		_ = rows.Scan(&t.ID, &t.Name, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.MaxRetries, &t.CreatedAt)
+		out = append(out, t)
+	}
 	return out
 }
 
@@ -3369,4 +3777,31 @@ func getenv(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
+}
+
+func normalizeTags(raw string) string {
+	return strings.Join(splitCSV(strings.NewReplacer("，", ",", "\n", ",", ";", ",").Replace(raw)), ",")
+}
+
+func mustMarshalJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
