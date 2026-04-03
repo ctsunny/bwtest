@@ -418,6 +418,7 @@ func main() {
 	mux.Handle(p+"/client/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteClient(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, &cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
+	mux.Handle(p+"/task/stop-all", basicAuth(cfg, http.HandlerFunc(handleStopAllTasks(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
 	mux.Handle(p+"/task/logs", basicAuth(cfg, http.HandlerFunc(handleGetTaskLogs(db))))
 	mux.Handle(p+"/task/clear-history", basicAuth(cfg, http.HandlerFunc(handleClearHistory(p, db, broker))))
@@ -1403,6 +1404,7 @@ body {
   margin-bottom: 18px; flex-wrap: wrap; gap: 10px;
 }
 .card-hd-left { display: flex; align-items: center; gap: 10px; }
+.card-hd-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 h1 { font-size: 22px; font-weight: 800; letter-spacing: -.03em; color: var(--tx); }
 h2 { font-size: 15px; font-weight: 700; color: var(--tx); display: flex; align-items: center; gap: 8px; margin: 0; }
 .h2-icon {
@@ -1743,7 +1745,7 @@ input:focus, select:focus, textarea:focus {
       <div class="h2-icon">🖥</div>
       <h2>客户端列表</h2>
     </div>
-    <div style="display:flex;gap:10px;font-size:12px">
+    <div class="card-hd-right" style="font-size:12px">
       <button type="button" class="sec" id="selectAllClientsBtn">全选任务目标</button>
       <button type="button" class="sec" id="deselectAllClientsBtn">清空选择</button>
     </div>
@@ -1751,7 +1753,7 @@ input:focus, select:focus, textarea:focus {
   <div class="tbl-wrap">
   <table>
     <thead><tr>
-      <th>选择</th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
+      <th><label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:inherit;font-size:inherit;font-weight:inherit;cursor:pointer"><input type="checkbox" id="clientSelectAllToggle" aria-label="全选服务器" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">全选</label></th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
       <th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
     </tr></thead>
     <tbody id="clientBody">
@@ -1856,6 +1858,9 @@ input:focus, select:focus, textarea:focus {
     <div class="card-hd-left">
       <div class="h2-icon">🟢</div>
       <h2>正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--tx3);font-weight:400;margin-left:6px"></span></h2>
+    </div>
+    <div class="card-hd-right">
+      <button type="button" class="warn" id="stopAllTasksBtn">✖ 一键取消全部</button>
     </div>
   </div>
   <div class="tbl-wrap">
@@ -1983,6 +1988,22 @@ function getTaskClientCheckboxes() {
   return document.querySelectorAll('#clientBody .task-client-checkbox');
 }
 
+function syncClientSelectAllToggle() {
+  var toggle = document.getElementById('clientSelectAllToggle');
+  if (!toggle) return;
+  var checkboxes = Array.prototype.slice.call(getTaskClientCheckboxes());
+  if (checkboxes.length === 0) {
+    toggle.checked = false;
+    toggle.indeterminate = false;
+    toggle.disabled = true;
+    return;
+  }
+  var checkedCount = checkboxes.filter(function(cb) { return cb.checked; }).length;
+  toggle.disabled = false;
+  toggle.checked = checkedCount === checkboxes.length;
+  toggle.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+}
+
 function getSelectedClientIDs() {
   var ids = [];
   getTaskClientCheckboxes().forEach(function(cb) {
@@ -1997,6 +2018,7 @@ function setSelectedClientIDs(ids) {
   getTaskClientCheckboxes().forEach(function(cb) {
     cb.checked = !!wanted[cb.value];
   });
+  syncClientSelectAllToggle();
 }
 
 function buildTaskRequestBody(form) {
@@ -2230,6 +2252,21 @@ function updateStats(data) {
   if (elTraffic) elTraffic.textContent = fmtGB(totalTraffic);
 }
 
+function getActiveTasks(tasks) {
+  return (tasks || []).filter(function(t) {
+    return t.status === 'running' || t.status === 'pending' || t.status === 'stopping';
+  });
+}
+
+function syncStopAllTasksButton(tasks) {
+  var btn = document.getElementById('stopAllTasksBtn');
+  if (!btn) return;
+  var activeTasks = getActiveTasks(tasks);
+  btn.disabled = activeTasks.length === 0;
+  btn.dataset.count = String(activeTasks.length);
+  btn.textContent = activeTasks.length > 0 ? '✖ 一键取消全部 (' + activeTasks.length + ')' : '✖ 一键取消全部';
+}
+
 function taskLayoutKey(tasks) {
   return tasks.map(function(t) {
     return [t.id, t.status, t.client_id, t.started_at || '', t.finished_at || ''].join(':');
@@ -2325,9 +2362,11 @@ function pollData() {
         var ctCell = row.querySelector('.curtask-col');
         if (ctCell) ctCell.textContent = c.current_task || '';
       });
+      syncClientSelectAllToggle();
       tickPing();
 
       updateStats(data);
+      syncStopAllTasksButton(tasks);
       var hint = document.getElementById('taskRefreshHint');
       if (hint) hint.textContent = '(上次同步: ' + new Date().toLocaleTimeString() + ')';
     })
@@ -2626,11 +2665,43 @@ if (taskForm) taskForm.addEventListener('submit', function(e) {
 var sab = document.getElementById('selectAllClientsBtn');
 if (sab) sab.addEventListener('click', function() {
   getTaskClientCheckboxes().forEach(function(cb) { cb.checked = true; });
+  syncClientSelectAllToggle();
 });
 var dsab = document.getElementById('deselectAllClientsBtn');
 if (dsab) dsab.addEventListener('click', function() {
   getTaskClientCheckboxes().forEach(function(cb) { cb.checked = false; });
+  syncClientSelectAllToggle();
 });
+var clientSelectAllToggle = document.getElementById('clientSelectAllToggle');
+if (clientSelectAllToggle) clientSelectAllToggle.addEventListener('change', function() {
+  getTaskClientCheckboxes().forEach(function(cb) { cb.checked = clientSelectAllToggle.checked; });
+  syncClientSelectAllToggle();
+});
+var clientBodyEl = document.getElementById('clientBody');
+if (clientBodyEl) clientBodyEl.addEventListener('change', function(e) {
+  if (e.target && e.target.classList && e.target.classList.contains('task-client-checkbox')) {
+    syncClientSelectAllToggle();
+  }
+});
+syncClientSelectAllToggle();
+
+var stopAllTasksBtn = document.getElementById('stopAllTasksBtn');
+if (stopAllTasksBtn) stopAllTasksBtn.addEventListener('click', function() {
+  var count = parseInt(stopAllTasksBtn.dataset.count || '0', 10) || 0;
+  if (count <= 0) {
+    alert('当前没有可取消的任务');
+    return;
+  }
+  if (!confirm('确认一键取消全部 ' + count + ' 个任务？')) return;
+  stopAllTasksBtn.disabled = true;
+  apiFetch('/task/stop-all')
+    .then(function() { pollData(); })
+    .catch(function(err) { alert('批量取消失败: ' + err); })
+    .finally(function() { pollData(); });
+});
+syncStopAllTasksButton(Array.prototype.slice.call(document.querySelectorAll('#runningTaskBody tr[data-task-id]')).map(function(row) {
+  return { status: row.dataset.status || '' };
+}));
 
 document.querySelectorAll('.flash-test-btn').forEach(function(b) {
   b.addEventListener('click', function() {
@@ -2667,8 +2738,8 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			"divf": func(a int64, b float64) float64 {
 				return float64(a) / b
 			},
-			"modeLabel":     taskModeLabel,
-			"densityLabel":  densityLabel,
+			"modeLabel":    taskModeLabel,
+			"densityLabel": densityLabel,
 			"shortTime": func(s string) string {
 				if s == "" {
 					return ""
@@ -3058,6 +3129,39 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 			_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, taskID)
 			if clientID != "" {
 				_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
+			}
+		}
+		broker.Publish("tasks")
+		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
+			!strings.Contains(r.Header.Get("Accept"), "application/json") {
+			http.Redirect(w, r, panelPath, http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+}
+
+func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now().Format(time.RFC3339)
+		rows, err := db.Query(`SELECT id, status, client_id FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var taskID, status, clientID string
+				if err := rows.Scan(&taskID, &status, &clientID); err != nil {
+					continue
+				}
+				switch status {
+				case "running":
+					_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=?`, taskID)
+				case "pending", "stopping":
+					_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, taskID)
+					if clientID != "" {
+						_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
+					}
+				}
 			}
 		}
 		broker.Publish("tasks")

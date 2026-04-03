@@ -386,3 +386,70 @@ func TestHandleGenInstallCmdReturnsJSON(t *testing.T) {
 		t.Fatalf("generated command missing init token: %q", resp.GeneratedCmd)
 	}
 }
+
+func TestHandleStopAllTasks(t *testing.T) {
+	db := mustInitDB(filepath.Join(t.TempDir(), "bwtest.db"))
+	defer db.Close()
+
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c1", "node-1", "", "secret-1", 1, now, "127.0.0.1", "task-pending", "v1")
+	if err != nil {
+		t.Fatalf("insert client c1: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO clients(id,name,remark,token,approved,last_seen,remote_ip,current_task,version) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c2", "node-2", "", "secret-2", 1, now, "127.0.0.2", "task-running", "v1")
+	if err != nil {
+		t.Fatalf("insert client c2: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"task-pending", "c1", "upload", 1, 0, 60, 0, "pending", now)
+	if err != nil {
+		t.Fatalf("insert pending task: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,started_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"task-running", "c2", "download", 0, 1, 60, 0, "running", now, now)
+	if err != nil {
+		t.Fatalf("insert running task: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/task/stop-all", nil)
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+
+	handleStopAllTasks("/admin", db, NewBroker()).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleStopAllTasks status = %d, want 200", w.Code)
+	}
+
+	var pendingStatus, runningStatus, pendingFinished string
+	if err := db.QueryRow(`SELECT status, finished_at FROM tasks WHERE id=?`, "task-pending").Scan(&pendingStatus, &pendingFinished); err != nil {
+		t.Fatalf("query pending task: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status FROM tasks WHERE id=?`, "task-running").Scan(&runningStatus); err != nil {
+		t.Fatalf("query running task: %v", err)
+	}
+	if pendingStatus != "stopped" {
+		t.Fatalf("pending task status = %q, want stopped", pendingStatus)
+	}
+	if pendingFinished == "" {
+		t.Fatal("pending task finished_at should be set")
+	}
+	if runningStatus != "stopping" {
+		t.Fatalf("running task status = %q, want stopping", runningStatus)
+	}
+
+	var pendingClientTask, runningClientTask string
+	if err := db.QueryRow(`SELECT current_task FROM clients WHERE id=?`, "c1").Scan(&pendingClientTask); err != nil {
+		t.Fatalf("query c1 current_task: %v", err)
+	}
+	if err := db.QueryRow(`SELECT current_task FROM clients WHERE id=?`, "c2").Scan(&runningClientTask); err != nil {
+		t.Fatalf("query c2 current_task: %v", err)
+	}
+	if pendingClientTask != "" {
+		t.Fatalf("c1 current_task = %q, want empty", pendingClientTask)
+	}
+	if runningClientTask != "task-running" {
+		t.Fatalf("c2 current_task = %q, want task-running", runningClientTask)
+	}
+}
