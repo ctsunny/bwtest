@@ -1860,7 +1860,7 @@ input:focus, select:focus, textarea:focus {
       <h2>正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--tx3);font-weight:400;margin-left:6px"></span></h2>
     </div>
     <div class="card-hd-right">
-      <button type="button" class="warn" id="stopAllTasksBtn">✖ 一键取消全部</button>
+      <button type="button" class="warn" id="stopAllTasksBtn" data-count="{{len .RunningTasks}}" {{if eq (len .RunningTasks) 0}}disabled{{end}}>{{if gt (len .RunningTasks) 0}}✖ 一键取消全部 ({{len .RunningTasks}}){{else}}✖ 一键取消全部{{end}}</button>
     </div>
   </div>
   <div class="tbl-wrap">
@@ -2698,9 +2698,6 @@ if (stopAllTasksBtn) stopAllTasksBtn.addEventListener('click', function() {
     .catch(function(err) { alert('批量取消失败: ' + err); })
     .finally(function() { pollData(); });
 });
-syncStopAllTasksButton(Array.prototype.slice.call(document.querySelectorAll('#runningTaskBody tr[data-task-id]')).map(function(row) {
-  return { status: row.dataset.status || '' };
-}));
 
 document.querySelectorAll('.flash-test-btn').forEach(function(b) {
   b.addEventListener('click', function() {
@@ -3145,16 +3142,18 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 	return func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().Format(time.RFC3339)
 		type stopTaskItem struct {
-			id       string
-			status   string
-			clientID string
+			id        string
+			status    string
+			clientID  string
+			createdAt string
+			startedAt string
 		}
 		tx, err := db.Begin()
 		if err != nil {
 			http.Error(w, "failed to begin transaction", http.StatusInternalServerError)
 			return
 		}
-		rows, err := tx.Query(`SELECT id, status, client_id FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
+		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
 		if err != nil {
 			_ = tx.Rollback()
 			http.Error(w, "failed to query tasks", http.StatusInternalServerError)
@@ -3163,13 +3162,19 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 		var items []stopTaskItem
 		defer rows.Close()
 		for rows.Next() {
-			var taskID, status, clientID string
-			if err := rows.Scan(&taskID, &status, &clientID); err != nil {
+			var taskID, status, clientID, createdAt, startedAt string
+			if err := rows.Scan(&taskID, &status, &clientID, &createdAt, &startedAt); err != nil {
 				_ = tx.Rollback()
 				http.Error(w, "failed to scan task row", http.StatusInternalServerError)
 				return
 			}
-			items = append(items, stopTaskItem{id: taskID, status: status, clientID: clientID})
+			items = append(items, stopTaskItem{
+				id:        taskID,
+				status:    status,
+				clientID:  clientID,
+				createdAt: createdAt,
+				startedAt: startedAt,
+			})
 		}
 		if err := rows.Err(); err != nil {
 			_ = tx.Rollback()
@@ -3189,8 +3194,12 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 					http.Error(w, "failed to update running task", http.StatusInternalServerError)
 					return
 				}
-			case "pending", "stopping":
-				if _, err := tx.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, item.id); err != nil {
+			case "pending":
+				startedAt := item.startedAt
+				if startedAt == "" {
+					startedAt = item.createdAt
+				}
+				if _, err := tx.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=? WHERE id=?`, now, startedAt, item.id); err != nil {
 					_ = tx.Rollback()
 					http.Error(w, "failed to stop queued task", http.StatusInternalServerError)
 					return
