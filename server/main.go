@@ -2141,9 +2141,10 @@ function bindClick(id, fn) {
 }
 
 function escapeHTML(value) {
+  var backtick = String.fromCharCode(96);
   return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
-  }).replace(new RegExp(String.fromCharCode(96), 'g'), '&#96;');
+  }).split(backtick).join('&#96;');
 }
 
 var clientNameMap = {};

@@ -466,8 +466,19 @@ func TestHandleCreateTaskScheduledAndRetry(t *testing.T) {
 		t.Fatalf("insert client: %v", err)
 	}
 
-	form := "client_id=c1&mode=upload&up_mbps=10&down_mbps=0&duration_val=5&duration_unit=min&density=30&max_retries=2&scheduled_at=" + url.QueryEscape(now) + "&template_name=" + url.QueryEscape("nightly")
-	req := httptest.NewRequest(http.MethodPost, "/admin/task/create", strings.NewReader(form))
+	form := url.Values{
+		"client_id":     {"c1"},
+		"mode":          {"upload"},
+		"up_mbps":       {"10"},
+		"down_mbps":     {"0"},
+		"duration_val":  {"5"},
+		"duration_unit": {"min"},
+		"density":       {"30"},
+		"max_retries":   {"2"},
+		"scheduled_at":  {now},
+		"template_name": {"nightly"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/task/create", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	w := httptest.NewRecorder()
