@@ -31,6 +31,7 @@ import (
 )
 
 var Version = "v0.4.20"
+var tagNormalizer = strings.NewReplacer("，", ",", "\n", ",", ";", ",")
 
 type Config struct {
 	PanelAddr  string
@@ -1884,7 +1885,7 @@ input:focus, select:focus, textarea:focus {
   <div class="tbl-wrap">
   <table>
     <thead><tr>
-      <th><label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:inherit;font-size:inherit;font-weight:inherit;cursor:pointer"><input type="checkbox" id="clientSelectAllToggle" aria-label="全选服务器" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">全选</label></th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
+      <th><label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:inherit;font-size:inherit;font-weight:inherit;cursor:pointer"><input type="checkbox" id="clientSelectAllToggle" aria-label="全选客户端" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">全选</label></th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
       <th>分组/标签</th><th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
     </tr></thead>
     <tbody id="clientBody">
@@ -2142,7 +2143,7 @@ function bindClick(id, fn) {
 function escapeHTML(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
-  });
+  }).replace(new RegExp(String.fromCharCode(96), 'g'), '&#96;');
 }
 
 var clientNameMap = {};
@@ -3545,7 +3546,12 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 				status:    status,
 				clientID:  clientID,
 				createdAt: createdAt,
-				startedAt: startedAt.String,
+				startedAt: func() string {
+					if startedAt.Valid {
+						return startedAt.String
+					}
+					return ""
+				}(),
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -3798,7 +3804,7 @@ func splitCSV(raw string) []string {
 }
 
 func normalizeTags(raw string) string {
-	return strings.Join(splitCSV(strings.NewReplacer("，", ",", "\n", ",", ";", ",").Replace(raw)), ",")
+	return strings.Join(splitCSV(tagNormalizer.Replace(raw)), ",")
 }
 
 func mustMarshalJSON(v any) string {
