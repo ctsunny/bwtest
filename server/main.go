@@ -1248,24 +1248,25 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 			Name string
 		}
 		type pageData struct {
-			Clients         []Client
-			RunningTasks    []Task
-			HistoryTasks    []Task
-			ApprovedClients []approvedClient
-			DefaultClientID string
-			ClientNames     map[string]string
-			PanelPath       string
-			ServerHost      string
-			InitToken       string
-			Version         string
-			BarkURL         string
-			PanelPathJS     template.JS
-			InitTokenJS     template.JS
-			VersionJS       template.JS
-			GenName         string
-			GenRemark       string
-			GenVersion      string
-			GeneratedCmd    string
+			Clients              []Client
+			RunningTasks         []Task
+			HistoryTasks         []Task
+			ApprovedClients      []approvedClient
+			CancellableTaskCount int
+			DefaultClientID      string
+			ClientNames          map[string]string
+			PanelPath            string
+			ServerHost           string
+			InitToken            string
+			Version              string
+			BarkURL              string
+			PanelPathJS          template.JS
+			InitTokenJS          template.JS
+			VersionJS            template.JS
+			GenName              string
+			GenRemark            string
+			GenVersion           string
+			GeneratedCmd         string
 		}
 
 		var approvedClients []approvedClient
@@ -1282,9 +1283,13 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 		}
 
 		var runningTasks, historyTasks []Task
+		cancellableTaskCount := 0
 		for _, t := range tasks {
 			if t.Status == "running" || t.Status == "pending" || t.Status == "stopping" {
 				runningTasks = append(runningTasks, t)
+				if t.Status == "running" || t.Status == "pending" {
+					cancellableTaskCount++
+				}
 			} else {
 				historyTasks = append(historyTasks, t)
 			}
@@ -1860,7 +1865,7 @@ input:focus, select:focus, textarea:focus {
       <h2>正在执行的任务 <span id="taskRefreshHint" style="font-size:12px;color:var(--tx3);font-weight:400;margin-left:6px"></span></h2>
     </div>
     <div class="card-hd-right">
-      <button type="button" class="warn" id="stopAllTasksBtn" data-count="{{len .RunningTasks}}" {{if eq (len .RunningTasks) 0}}disabled{{end}}>{{if gt (len .RunningTasks) 0}}✖ 一键取消全部 ({{len .RunningTasks}}){{else}}✖ 一键取消全部{{end}}</button>
+      <button type="button" class="warn" id="stopAllTasksBtn" data-count="{{.CancellableTaskCount}}" {{if eq .CancellableTaskCount 0}}disabled{{end}}>{{if gt .CancellableTaskCount 0}}✖ 一键取消全部 ({{.CancellableTaskCount}}){{else}}✖ 一键取消全部{{end}}</button>
     </div>
   </div>
   <div class="tbl-wrap">
@@ -2254,7 +2259,7 @@ function updateStats(data) {
 
 function getActiveTasks(tasks) {
   return (tasks || []).filter(function(t) {
-    return t.status === 'running' || t.status === 'pending' || t.status === 'stopping';
+    return t.status === 'running' || t.status === 'pending';
   });
 }
 
@@ -2675,7 +2680,7 @@ if (dsab) dsab.addEventListener('click', function() {
 var clientSelectAllToggle = document.getElementById('clientSelectAllToggle');
 if (clientSelectAllToggle) clientSelectAllToggle.addEventListener('change', function() {
   getTaskClientCheckboxes().forEach(function(cb) { cb.checked = clientSelectAllToggle.checked; });
-  syncClientSelectAllToggle();
+  clientSelectAllToggle.indeterminate = false;
 });
 var clientBodyEl = document.getElementById('clientBody');
 if (clientBodyEl) clientBodyEl.addEventListener('change', function(e) {
@@ -2786,24 +2791,25 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			},
 		}).Parse(page))
 		_ = tpl.Execute(w, pageData{
-			Clients:         clients,
-			RunningTasks:    runningTasks,
-			HistoryTasks:    historyTasks,
-			ApprovedClients: approvedClients,
-			DefaultClientID: defaultClientID,
-			ClientNames:     clientNames,
-			PanelPath:       cfg.PanelPath,
-			ServerHost:      cfg.ServerHost,
-			InitToken:       cfg.InitToken,
-			Version:         version,
-			BarkURL:         cfg.BarkURL,
-			PanelPathJS:     jsStr(cfg.PanelPath),
-			InitTokenJS:     jsStr(cfg.InitToken),
-			VersionJS:       jsStr(version),
-			GenName:         genName,
-			GenRemark:       genRemark,
-			GenVersion:      genVersion,
-			GeneratedCmd:    generatedCmd,
+			Clients:              clients,
+			RunningTasks:         runningTasks,
+			HistoryTasks:         historyTasks,
+			ApprovedClients:      approvedClients,
+			CancellableTaskCount: cancellableTaskCount,
+			DefaultClientID:      defaultClientID,
+			ClientNames:          clientNames,
+			PanelPath:            cfg.PanelPath,
+			ServerHost:           cfg.ServerHost,
+			InitToken:            cfg.InitToken,
+			Version:              version,
+			BarkURL:              cfg.BarkURL,
+			PanelPathJS:          jsStr(cfg.PanelPath),
+			InitTokenJS:          jsStr(cfg.InitToken),
+			VersionJS:            jsStr(version),
+			GenName:              genName,
+			GenRemark:            genRemark,
+			GenVersion:           genVersion,
+			GeneratedCmd:         generatedCmd,
 		})
 	}
 }
@@ -3154,12 +3160,13 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 			http.Error(w, "failed to begin transaction", http.StatusInternalServerError)
 			return
 		}
-		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
+		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending')`)
 		if err != nil {
 			_ = tx.Rollback()
 			http.Error(w, "failed to query tasks", http.StatusInternalServerError)
 			return
 		}
+		defer rows.Close()
 		var items []stopTaskItem
 		for rows.Next() {
 			var taskID, status, clientID, createdAt string
@@ -3208,8 +3215,6 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 						return
 					}
 				}
-			case "stopping":
-				continue
 			}
 		}
 		if err := tx.Commit(); err != nil {
