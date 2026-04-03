@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -489,7 +490,7 @@ func TestHandleCreateTaskScheduledAndRetry(t *testing.T) {
 	}
 
 	var status, scheduledAt, templateName string
-	var maxRetries int
+	var maxRetries sql.NullInt64
 	if err := db.QueryRow(`SELECT status, scheduled_at, max_retries, template_name FROM tasks LIMIT 1`).Scan(&status, &scheduledAt, &maxRetries, &templateName); err != nil {
 		t.Fatalf("query task: %v", err)
 	}
@@ -499,8 +500,8 @@ func TestHandleCreateTaskScheduledAndRetry(t *testing.T) {
 	if scheduledAt != now {
 		t.Fatalf("scheduled_at = %q, want %q", scheduledAt, now)
 	}
-	if maxRetries != 2 {
-		t.Fatalf("max_retries = %d, want 2", maxRetries)
+	if !maxRetries.Valid || maxRetries.Int64 != 2 {
+		t.Fatalf("max_retries = %v, want 2", maxRetries)
 	}
 	if templateName != "nightly" {
 		t.Fatalf("template_name = %q, want nightly", templateName)

@@ -1136,7 +1136,14 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			if search != "" {
-				haystack := strings.ToLower(strings.Join([]string{t.ID, clientName, t.ClientID, t.Mode, t.Status, t.TemplateName}, " "))
+				parts := []string{t.ID, clientName, t.ClientID, t.Mode, t.Status, t.TemplateName}
+				filtered := make([]string, 0, len(parts))
+				for _, part := range parts {
+					if part != "" {
+						filtered = append(filtered, part)
+					}
+				}
+				haystack := strings.ToLower(strings.Join(filtered, " "))
 				if !strings.Contains(haystack, search) {
 					continue
 				}
@@ -2141,10 +2148,10 @@ function bindClick(id, fn) {
 }
 
 function escapeHTML(value) {
-  var backtick = String.fromCharCode(96);
+  var BACKTICK_CHAR = String.fromCharCode(96);
   return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
-  }).split(backtick).join('&#96;');
+  }).split(BACKTICK_CHAR).join('&#96;');
 }
 
 var clientNameMap = {};
@@ -2419,7 +2426,7 @@ function buildHistoryRow(t) {
     + '<td data-label="操作"><div style="display:flex;gap:4px;flex-wrap:wrap">'
     + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
     + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
-    + '<button type="button" class="sec clone-btn" data-id="'+t.id+'" data-client="'+t.client_id+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
+    + '<button type="button" class="sec clone-btn" data-id="'+escapeHTML(t.id)+'" data-client="'+escapeHTML(t.client_id)+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
     + '<button type="button" class="sec save-template-row-btn" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">💾 模板</button>'
     + '</div></td>'
     + '</tr>';
@@ -3547,12 +3554,7 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 				status:    status,
 				clientID:  clientID,
 				createdAt: createdAt,
-				startedAt: func() string {
-					if startedAt.Valid {
-						return startedAt.String
-					}
-					return ""
-				}(),
+				startedAt: nullStringValue(startedAt),
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -3811,4 +3813,11 @@ func normalizeTags(raw string) string {
 func mustMarshalJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func nullStringValue(v sql.NullString) string {
+	if v.Valid {
+		return v.String
+	}
+	return ""
 }
