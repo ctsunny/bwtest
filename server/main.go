@@ -2149,9 +2149,11 @@ function bindClick(id, fn) {
 
 function escapeHTML(value) {
   var BACKTICK_CHAR = String.fromCharCode(96);
-  return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+  var ESCAPE_RE = new RegExp("[&<>\"'" + BACKTICK_CHAR + "]", 'g');
+  return String(value == null ? '' : value).replace(ESCAPE_RE, function(ch) {
+    if (ch === BACKTICK_CHAR) return '&#96;';
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
-  }).split(BACKTICK_CHAR).join('&#96;');
+  });
 }
 
 var clientNameMap = {};
@@ -2426,8 +2428,8 @@ function buildHistoryRow(t) {
     + '<td data-label="操作"><div style="display:flex;gap:4px;flex-wrap:wrap">'
     + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
     + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
-    + '<button type="button" class="sec clone-btn" data-id="'+escapeHTML(t.id)+'" data-client="'+escapeHTML(t.client_id)+'" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
-    + '<button type="button" class="sec save-template-row-btn" data-mode="'+t.mode+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">💾 模板</button>'
+    + '<button type="button" class="sec clone-btn" data-id="'+escapeHTML(t.id)+'" data-client="'+escapeHTML(t.client_id)+'" data-mode="'+escapeHTML(t.mode)+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
+    + '<button type="button" class="sec save-template-row-btn" data-mode="'+escapeHTML(t.mode)+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">💾 模板</button>'
     + '</div></td>'
     + '</tr>';
 }
