@@ -3192,11 +3192,11 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 					return
 				}
 			case "pending":
-				startedAt := item.startedAt
-				if startedAt == "" {
-					startedAt = item.createdAt
+				effectiveStartedAt := item.startedAt
+				if effectiveStartedAt == "" {
+					effectiveStartedAt = item.createdAt
 				}
-				if _, err := tx.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=? WHERE id=?`, now, startedAt, item.id); err != nil {
+				if _, err := tx.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=? WHERE id=?`, now, effectiveStartedAt, item.id); err != nil {
 					_ = tx.Rollback()
 					http.Error(w, "failed to stop queued task", http.StatusInternalServerError)
 					return
