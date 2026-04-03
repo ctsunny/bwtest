@@ -2675,6 +2675,7 @@ if (dsab) dsab.addEventListener('click', function() {
 var clientSelectAllToggle = document.getElementById('clientSelectAllToggle');
 if (clientSelectAllToggle) clientSelectAllToggle.addEventListener('change', function() {
   getTaskClientCheckboxes().forEach(function(cb) { cb.checked = clientSelectAllToggle.checked; });
+  syncClientSelectAllToggle();
 });
 var clientBodyEl = document.getElementById('clientBody');
 if (clientBodyEl) clientBodyEl.addEventListener('change', function(e) {
@@ -3153,7 +3154,7 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 			http.Error(w, "failed to begin transaction", http.StatusInternalServerError)
 			return
 		}
-		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending')`)
+		rows, err := tx.Query(`SELECT id, status, client_id, created_at, started_at FROM tasks WHERE status IN ('running', 'pending', 'stopping')`)
 		if err != nil {
 			_ = tx.Rollback()
 			http.Error(w, "failed to query tasks", http.StatusInternalServerError)
@@ -3161,7 +3162,8 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 		}
 		var items []stopTaskItem
 		for rows.Next() {
-			var taskID, status, clientID, createdAt, startedAt string
+			var taskID, status, clientID, createdAt string
+			var startedAt sql.NullString
 			if err := rows.Scan(&taskID, &status, &clientID, &createdAt, &startedAt); err != nil {
 				_ = tx.Rollback()
 				http.Error(w, "failed to scan task row", http.StatusInternalServerError)
@@ -3172,7 +3174,7 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 				status:    status,
 				clientID:  clientID,
 				createdAt: createdAt,
-				startedAt: startedAt,
+				startedAt: startedAt.String,
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -3180,11 +3182,7 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 			http.Error(w, "failed to iterate tasks", http.StatusInternalServerError)
 			return
 		}
-		if err := rows.Close(); err != nil {
-			_ = tx.Rollback()
-			http.Error(w, "failed to close task query", http.StatusInternalServerError)
-			return
-		}
+		rows.Close()
 		for _, item := range items {
 			switch item.status {
 			case "running":
@@ -3210,6 +3208,8 @@ func handleStopAllTasks(panelPath string, db *sql.DB, broker *Broker) http.Handl
 						return
 					}
 				}
+			case "stopping":
+				continue
 			}
 		}
 		if err := tx.Commit(); err != nil {
