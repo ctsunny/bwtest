@@ -1907,41 +1907,57 @@ input:focus, select:focus, textarea:focus {
 
 <!-- ── 对传任务弹窗 ───────────────────────────────────────────────── -->
 <div id="peerModal" class="modal-overlay">
-  <div class="modal-inner" style="width:min(520px,95vw)">
+  <div class="modal-inner" style="width:min(560px,95vw)">
     <div class="modal-hd">
       <span class="modal-title">⚡ 创建对传任务</span>
       <button type="button" class="modal-x" onclick="document.getElementById('peerModal').classList.remove('open')">✕</button>
     </div>
-    <p style="margin-bottom:16px;font-size:13px;color:var(--tx3)">
-      两台客户端直接建立 TCP 连接互相传输数据，不经过服务端，真实测量端到端带宽。
+    <p style="margin-bottom:14px;font-size:13px;color:var(--tx3)">
+      两台客户端直接建立 TCP 连接互传数据，不经过服务端，真实测量端到端带宽。
     </p>
-    <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px">
-      <div style="flex:1">
-        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">源端（主动监听）</label>
+    <!-- 源端 / 目标端选择 -->
+    <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:end;margin-bottom:14px">
+      <div>
+        <label style="font-size:11px;font-weight:700;color:var(--tx2);display:flex;align-items:center;gap:4px;margin-bottom:5px">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:var(--info-bg);color:var(--info);border-radius:4px;font-size:10px">🔊</span>
+          源端 <span style="font-weight:400;color:var(--tx3)">(监听等待连接)</span>
+        </label>
         <select id="peerSourceSelect" style="width:100%;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px">
-          <option value="">请选择客户端</option>
+          <option value="">— 请选择 —</option>
           {{range .ApprovedClients}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
         </select>
       </div>
-      <div style="font-size:20px;padding-top:18px;color:var(--primary);flex-shrink:0">↔</div>
-      <div style="flex:1">
-        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">目标端（主动连接）</label>
+      <button type="button" id="peerSwapBtn" title="互换源端与目标端" style="background:var(--surf2);color:var(--tx2);border:1px solid var(--bdr);padding:8px 10px;align-self:end;margin-bottom:1px">⇄</button>
+      <div>
+        <label style="font-size:11px;font-weight:700;color:var(--tx2);display:flex;align-items:center;gap:4px;margin-bottom:5px">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:var(--ok-bg);color:var(--ok-txt);border-radius:4px;font-size:10px">🔌</span>
+          目标端 <span style="font-weight:400;color:var(--tx3)">(主动发起连接)</span>
+        </label>
         <select id="peerTargetSelect" style="width:100%;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px">
-          <option value="">请选择客户端</option>
+          <option value="">— 请选择 —</option>
           {{range .ApprovedClients}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
         </select>
       </div>
     </div>
-    <div style="display:flex;gap:12px;margin-bottom:16px">
-      <div style="flex:1">
-        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">传输速率 (Mbps)</label>
+    <!-- 连接方向示意 -->
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:14px;font-size:12px;color:var(--tx3)">
+      <span id="peerSrcLabel" style="font-weight:600;color:var(--info);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">源端</span>
+      <span style="flex:1;height:2px;background:linear-gradient(90deg,var(--info),var(--ok));border-radius:1px;position:relative;min-width:40px">
+        <span style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--surf);padding:0 4px;font-size:11px;color:var(--primary);font-weight:700">↔</span>
+      </span>
+      <span id="peerTgtLabel" style="font-weight:600;color:var(--ok-txt);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">目标端</span>
+    </div>
+    <!-- 速率 + 时长 -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:5px">目标速率 (Mbps)</label>
         <input id="peerMbps" type="number" value="100" min="1" max="100000" style="width:100%">
       </div>
-      <div style="flex:1">
-        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">时长</label>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:5px">测试时长</label>
         <div style="display:flex;gap:6px">
-          <input id="peerDurVal" type="number" value="1" min="1" style="flex:1">
-          <select id="peerDurUnit" style="width:auto;min-width:72px;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px;flex-shrink:0">
+          <input id="peerDurVal" type="number" value="1" min="1" style="flex:1;min-width:0">
+          <select id="peerDurUnit" style="width:auto;min-width:68px;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px;flex-shrink:0">
             <option value="sec">秒</option>
             <option value="min" selected>分</option>
             <option value="hour">时</option>
@@ -1949,8 +1965,11 @@ input:focus, select:focus, textarea:focus {
         </div>
       </div>
     </div>
-    <div style="font-size:12px;color:var(--tx3);margin-bottom:16px;padding:10px;background:var(--surf2);border-radius:var(--r-sm)">
-      💡 注意：源端需要有公网 IP 或与目标端处于同一网络，否则目标端无法连接。
+    <!-- 预计传输量 -->
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--surf2);border-radius:var(--r-sm);margin-bottom:12px;font-size:12px">
+      <span style="color:var(--tx3)">📊 预计传输量：</span>
+      <span id="peerEstimate" style="font-weight:700;color:var(--primary)">—</span>
+      <span style="margin-left:auto;color:var(--tx3)">源端需有公网 IP 或与目标端同网</span>
     </div>
     <div style="display:flex;gap:8px">
       <button type="button" id="confirmPeerBtn" style="background:var(--primary)">⚡ 创建对传</button>
@@ -2229,7 +2248,7 @@ input:focus, select:focus, textarea:focus {
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           <button type="button" class="info view-logs-btn" data-task-id="{{.ID}}">📄 日志</button>
           <button type="button" class="danger del-task-btn" data-task-id="{{.ID}}">🗑 删除</button>
-          {{if not .PeerRole}}<button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">🔄 克隆</button>
+          {{if eq .PeerRole ""}}<button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">🔄 克隆</button>
           <button type="button" class="sec save-template-row-btn" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">💾 模板</button>{{end}}
         </div>
       </td>
@@ -2504,14 +2523,14 @@ function durationToSeconds(val, unit) {
 }
 
 function buildProgress(t) {
-  if (t.status === 'pending') return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:0%%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--muted)">等待中 (0%%)</div>';
+  if (t.status === 'pending') return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:0%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--tx3)">等待中 (0%)</div>';
   if (t.status !== 'running' && t.status !== 'stopping') return '-';
   if (!t.started_at) return '-';
   var st = new Date(t.started_at).getTime();
   if (isNaN(st)) return '-';
   var elapsed = (Date.now() - st) / 1000;
   var pct = Math.min((elapsed / t.duration_sec) * 100, 100);
-  return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:'+pct.toFixed(1)+'%%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--primary)">'+pct.toFixed(1)+'%%</div>';
+  return '<div class="progress-bar-container"><div class="progress-bar-fill" style="width:'+pct.toFixed(1)+'%"></div></div><div style="font-size:10px;margin-top:2px;color:var(--primary)">'+pct.toFixed(1)+'%</div>';
 }
 
 // 动态行：停止按钮输出为 form，保证无 JS 也可提交
@@ -2663,7 +2682,7 @@ function pollData() {
         var rb = document.getElementById('runningTaskBody');
         var runningColspan = tableColspan('runningTaskBody', 12);
         if (rb) rb.innerHTML = runningTasks.length === 0
-          ? '<tr id="noRunningRow"><td colspan="' + runningColspan + '" style="text-align:center;color:var(--muted);padding:20px">暂无正在执行的任务</td></tr>'
+          ? '<tr id="noRunningRow"><td colspan="' + runningColspan + '" style="text-align:center;color:var(--tx3);padding:20px">暂无正在执行的任务</td></tr>'
           : runningTasks.map(buildRunningRow).join('');
         var hb = document.getElementById('historyTaskBody');
         var historyColspan = tableColspan('historyTaskBody', 11);
@@ -3106,6 +3125,55 @@ document.querySelectorAll('.modal-overlay').forEach(function(m) {
   });
 });
 
+// 对传: 互换源端/目标端
+bindClick('peerSwapBtn', function() {
+  var srcSel = document.getElementById('peerSourceSelect');
+  var tgtSel = document.getElementById('peerTargetSelect');
+  var tmp = srcSel.value;
+  srcSel.value = tgtSel.value;
+  tgtSel.value = tmp;
+  updatePeerLabels();
+  updatePeerEstimate();
+});
+
+// 对传: 实时更新连接标签
+function updatePeerLabels() {
+  var srcSel = document.getElementById('peerSourceSelect');
+  var tgtSel = document.getElementById('peerTargetSelect');
+  var srcLabel = document.getElementById('peerSrcLabel');
+  var tgtLabel = document.getElementById('peerTgtLabel');
+  if (srcLabel) srcLabel.textContent = (srcSel && srcSel.value) ? srcSel.options[srcSel.selectedIndex].text : '源端';
+  if (tgtLabel) tgtLabel.textContent = (tgtSel && tgtSel.value) ? tgtSel.options[tgtSel.selectedIndex].text : '目标端';
+}
+
+// 对传: 预计传输量
+function updatePeerEstimate() {
+  var mbps = parseFloat(document.getElementById('peerMbps').value) || 0;
+  var durVal = parseInt(document.getElementById('peerDurVal').value) || 0;
+  var durUnit = document.getElementById('peerDurUnit').value;
+  var durSec = durationToSeconds(durVal, durUnit);
+  var el = document.getElementById('peerEstimate');
+  if (!el) return;
+  if (!mbps || !durSec) { el.textContent = '—'; return; }
+  var bytes = (mbps * 1000000 / 8) * durSec;
+  var gb = bytes / 1073741824;
+  el.textContent = gb >= 0.1 ? gb.toFixed(2) + ' GB' : (bytes / 1048576).toFixed(0) + ' MB';
+}
+
+(function() {
+  var peerSrcSel = document.getElementById('peerSourceSelect');
+  var peerTgtSel = document.getElementById('peerTargetSelect');
+  var peerMbpsEl = document.getElementById('peerMbps');
+  var peerDurValEl = document.getElementById('peerDurVal');
+  var peerDurUnitEl = document.getElementById('peerDurUnit');
+  if (peerSrcSel) peerSrcSel.addEventListener('change', function() { updatePeerLabels(); updatePeerEstimate(); });
+  if (peerTgtSel) peerTgtSel.addEventListener('change', function() { updatePeerLabels(); updatePeerEstimate(); });
+  if (peerMbpsEl) peerMbpsEl.addEventListener('input', updatePeerEstimate);
+  if (peerDurValEl) peerDurValEl.addEventListener('input', updatePeerEstimate);
+  if (peerDurUnitEl) peerDurUnitEl.addEventListener('change', updatePeerEstimate);
+})();
+updatePeerEstimate();
+
 bindClick('confirmPeerBtn', function() {
   var src = document.getElementById('peerSourceSelect').value;
   var tgt = document.getElementById('peerTargetSelect').value;
@@ -3230,7 +3298,7 @@ if (stopAllTasksBtn) stopAllTasksBtn.addEventListener('click', function() {
   apiFetch('/task/stop-all')
     .then(function() { pollData(); })
     .catch(function(err) { alert('批量取消失败: ' + err); })
-    .finally(function() { pollData(); });
+    .finally(function() { stopAllTasksBtn.disabled = false; pollData(); });
 });
 bindClick('bulkRestartClientsBtn', function() {
   var ids = selectedClientIDsCSV();
