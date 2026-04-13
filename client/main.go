@@ -563,6 +563,12 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 							break
 						}
 					}
+					// For peer target tasks, refresh peer_addr from server before retrying.
+					if normalizeTaskMode(t.Mode) == "peer" && t.PeerRole == "target" {
+						if addr, err := fetchPeerAddr(cfg, t.ID); err == nil && addr != "" {
+							t.PeerAddr = addr
+						}
+					}
 				}
 				continue
 			}
@@ -595,6 +601,13 @@ func runTaskWithRetry(cfg *Config, t *Task) (int64, int64, string) {
 			time.Sleep(time.Second)
 			if time.Now().After(deadline) || atomic.LoadInt32(&stopFlag) == 1 {
 				break
+			}
+		}
+		// For peer target tasks, re-fetch peer_addr from the server in case the
+		// source has restarted on a new port since our last attempt.
+		if normalizeTaskMode(t.Mode) == "peer" && t.PeerRole == "target" {
+			if addr, err := fetchPeerAddr(cfg, t.ID); err == nil && addr != "" {
+				t.PeerAddr = addr
 			}
 		}
 	}
@@ -1114,12 +1127,34 @@ func reportPeerAddr(cfg *Config, taskID, port string) error {
 	}, nil)
 }
 
+// fetchPeerAddr queries the server for the current peer_addr of a target task.
+// Used by the target client to refresh a stale address after a connection failure.
+func fetchPeerAddr(cfg *Config, taskID string) (string, error) {
+	url := fmt.Sprintf("%s/api/peer/addr?client_id=%s&client_token=%s&task_id=%s",
+		cfg.ServerURL, cfg.ClientID, cfg.ClientToken, taskID)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("status=%d", resp.StatusCode)
+	}
+	var result struct {
+		PeerAddr string `json:"peer_addr"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.PeerAddr, nil
+}
+
 // runPeerMode runs a direct peer-to-peer bandwidth test.
 //
 // Source role:
 //   - Listens on a random TCP port.
 //   - Reports the port to the server via /api/peer/addr.
-//   - Waits up to 30 s for the target to connect.
+//   - Waits up to the remaining task duration for the target to connect.
 //   - Once connected, both sides send and receive simultaneously at UpMbps.
 //
 // Target role:
@@ -1152,9 +1187,15 @@ func runPeerSource(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, to
 		log.Printf("[peer-src %s] reportPeerAddr error: %v", t.ID, err)
 		return "connfail"
 	}
-	log.Printf("[peer-src %s] address reported, waiting for target to connect (timeout 60s)...", t.ID)
 
-	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(60 * time.Second))
+	// Wait up to the remaining task duration for the target to connect.
+	acceptDeadline := deadline
+	if time.Until(acceptDeadline) > 5*time.Minute {
+		// Cap the initial wait at 5 minutes; the retry loop handles reconnects.
+		acceptDeadline = time.Now().Add(5 * time.Minute)
+	}
+	log.Printf("[peer-src %s] address reported, waiting for target to connect (timeout %.0fs)...", t.ID, time.Until(acceptDeadline).Seconds())
+	_ = ln.(*net.TCPListener).SetDeadline(acceptDeadline)
 	conn, err := ln.Accept()
 	if err != nil {
 		if atomic.LoadInt32(stopFlag) == 1 {

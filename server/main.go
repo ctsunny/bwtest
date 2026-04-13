@@ -1961,6 +1961,8 @@ input:focus, select:focus, textarea:focus {
             <option value="sec">秒</option>
             <option value="min" selected>分</option>
             <option value="hour">时</option>
+            <option value="day">天</option>
+            <option value="month">月</option>
           </select>
         </div>
       </div>
@@ -1970,6 +1972,12 @@ input:focus, select:focus, textarea:focus {
       <span style="color:var(--tx3)">📊 预计传输量：</span>
       <span id="peerEstimate" style="font-weight:700;color:var(--primary)">—</span>
       <span style="margin-left:auto;color:var(--tx3)">源端需有公网 IP 或与目标端同网</span>
+    </div>
+    <!-- 计划时间（可选） -->
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:5px">计划开始时间（可选，留空立即执行）</label>
+      <input id="peerScheduledAtInput" type="datetime-local" style="width:100%">
+      <input type="hidden" id="peerScheduledAtRFC3339">
     </div>
     <div style="display:flex;gap:8px">
       <button type="button" id="confirmPeerBtn" style="background:var(--primary)">⚡ 创建对传</button>
@@ -3183,16 +3191,29 @@ bindClick('confirmPeerBtn', function() {
   if (!src) { alert('请选择源端客户端'); return; }
   if (!tgt) { alert('请选择目标端客户端'); return; }
   if (src === tgt) { alert('源端和目标端不能是同一台客户端'); return; }
-  var btn = document.getElementById('confirmPeerBtn');
-  btn.disabled = true;
-  apiFetch('/task/peer-create',
-    'source_client_id=' + encodeURIComponent(src) +
+  var scheduledInput = document.getElementById('peerScheduledAtInput');
+  var scheduledRFC = document.getElementById('peerScheduledAtRFC3339');
+  if (scheduledInput && scheduledRFC) {
+    if (scheduledInput.value) {
+      var scheduledDate = new Date(scheduledInput.value);
+      scheduledRFC.value = isNaN(scheduledDate.getTime()) ? '' : scheduledDate.toISOString();
+    } else {
+      scheduledRFC.value = '';
+    }
+  }
+  var body = 'source_client_id=' + encodeURIComponent(src) +
     '&target_client_id=' + encodeURIComponent(tgt) +
     '&mbps=' + encodeURIComponent(mbps) +
     '&duration_val=' + encodeURIComponent(durVal) +
-    '&duration_unit=' + encodeURIComponent(durUnit))
+    '&duration_unit=' + encodeURIComponent(durUnit);
+  if (scheduledRFC && scheduledRFC.value) body += '&scheduled_at=' + encodeURIComponent(scheduledRFC.value);
+  var btn = document.getElementById('confirmPeerBtn');
+  btn.disabled = true;
+  apiFetch('/task/peer-create', body)
     .then(function() {
       document.getElementById('peerModal').classList.remove('open');
+      if (scheduledInput) scheduledInput.value = '';
+      if (scheduledRFC) scheduledRFC.value = '';
       pollData();
     })
     .catch(function(err) { alert('创建对传任务失败: ' + err); })
@@ -3964,11 +3985,36 @@ func handleClearHistory(panelPath string, db *sql.DB, broker *Broker) http.Handl
 
 // ── Peer Transfer Handlers ────────────────────────────────────────────────────
 
-// handlePeerAddr is called by the source client to report its listening address.
-// The server stores this address in the linked target task so that the target
-// client can connect to it directly.
+// handlePeerAddr handles both GET (query peer_addr for a target task) and POST
+// (source reports its listening address). GET is used by the target client to
+// refresh the peer_addr when retrying after a connection failure.
 func handlePeerAddr(db *sql.DB, broker *Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			// GET: target client queries the current peer_addr for its task
+			clientID := r.URL.Query().Get("client_id")
+			clientToken := r.URL.Query().Get("client_token")
+			taskID := r.URL.Query().Get("task_id")
+			var token string
+			var approved int
+			err := db.QueryRow(`SELECT token, approved FROM clients WHERE id=?`, clientID).
+				Scan(&token, &approved)
+			if err != nil || token != clientToken || approved != 1 {
+				http.Error(w, "unauthorized", 401)
+				return
+			}
+			var peerAddr, peerRole, taskClientID string
+			err = db.QueryRow(`SELECT peer_addr, peer_role, client_id FROM tasks WHERE id=?`, taskID).
+				Scan(&peerAddr, &peerRole, &taskClientID)
+			if err != nil || taskClientID != clientID || peerRole != "target" {
+				http.Error(w, "task not found or not a peer target task", 400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"peer_addr": peerAddr})
+			return
+		}
+
+		// POST: source client reports its listening port
 		var req struct {
 			ClientID    string `json:"client_id"`
 			ClientToken string `json:"client_token"`
@@ -4052,13 +4098,24 @@ func handleCreatePeerTask(panelPath string, cfg *Config, db *sql.DB, broker *Bro
 			http.Error(w, "both clients must be approved", 400)
 			return
 		}
+		scheduledAt := strings.TrimSpace(r.Form.Get("scheduled_at"))
+		if scheduledAt != "" {
+			if _, err := time.Parse(time.RFC3339, scheduledAt); err != nil {
+				http.Error(w, "invalid scheduled_at", 400)
+				return
+			}
+		}
 		now := time.Now().Format(time.RFC3339)
 		sourceID := genToken(8)
 		targetID := genToken(8)
+		initialStatus := "pending"
+		if scheduledAt != "" {
+			initialStatus = "scheduled"
+		}
 		// Create source task (listens for connection)
 		_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,scheduled_at,max_retries,retry_count,parent_task_id,template_name,peer_client_id,peer_role,peer_addr)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			sourceID, sourceClientID, "peer", mbps, mbps, dur, 0, "pending", now, "", 0, 0, "", "", targetClientID, "source", "")
+			sourceID, sourceClientID, "peer", mbps, mbps, dur, 0, initialStatus, now, scheduledAt, 0, 0, "", "", targetClientID, "source", "")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -4066,7 +4123,7 @@ func handleCreatePeerTask(panelPath string, cfg *Config, db *sql.DB, broker *Bro
 		// Create target task (connects to source; parent_task_id links to source for addr lookup)
 		_, err = db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,scheduled_at,max_retries,retry_count,parent_task_id,template_name,peer_client_id,peer_role,peer_addr)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			targetID, targetClientID, "peer", mbps, mbps, dur, 0, "pending", now, "", 0, 0, sourceID, "", sourceClientID, "target", "")
+			targetID, targetClientID, "peer", mbps, mbps, dur, 0, initialStatus, now, scheduledAt, 0, 0, sourceID, "", sourceClientID, "target", "")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
