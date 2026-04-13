@@ -1389,6 +1389,7 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 			GenName              string
 			GenRemark            string
 			GenVersion           string
+			GenPlatform          string
 			GeneratedCmd         string
 		}
 
@@ -1423,9 +1424,13 @@ func handleAdmin(cfg *Config, db *sql.DB) http.HandlerFunc {
 		genName := strings.TrimSpace(r.URL.Query().Get("gen_name"))
 		genRemark := strings.TrimSpace(r.URL.Query().Get("gen_remark"))
 		genVersion := strings.TrimSpace(r.URL.Query().Get("gen_version"))
+		genPlatform := strings.TrimSpace(r.URL.Query().Get("gen_platform"))
 		generatedCmd := strings.TrimSpace(r.URL.Query().Get("gen_cmd"))
 		if genVersion == "" {
 			genVersion = version
+		}
+		if genPlatform != "windows" {
+			genPlatform = "linux"
 		}
 
 		jsStr := func(s string) template.JS {
@@ -1864,6 +1869,13 @@ input:focus, select:focus, textarea:focus {
           <label class="note" style="display:block;margin-bottom:4px">版本号</label>
           <input id="genVersion" name="gen_version" value="{{.GenVersion}}">
         </div>
+        <div>
+          <label class="note" style="display:block;margin-bottom:4px">平台</label>
+          <select id="genPlatform" name="gen_platform" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--bdr);background:var(--surf);color:var(--tx);font-size:14px">
+            <option value="linux"   {{if ne .GenPlatform "windows"}}selected{{end}}>Linux (bash)</option>
+            <option value="windows" {{if eq .GenPlatform "windows"}}selected{{end}}>Windows (PowerShell)</option>
+          </select>
+        </div>
         <button type="submit" id="genBtn" style="width:100%">生成安装命令</button>
       </div>
     </form>
@@ -1871,7 +1883,7 @@ input:focus, select:focus, textarea:focus {
       <input id="cmdText" readonly value="{{.GeneratedCmd}}">
       <button type="button" class="sec" id="copyCmdBtn">复制</button>
     </div>
-    <div class="tip" id="cmdTip">{{if .GeneratedCmd}}将此命令复制到客户端 VPS 上执行即可完成安装与注册。{{end}}</div>
+    <div class="tip" id="cmdTip">{{if .GeneratedCmd}}{{if eq .GenPlatform "windows"}}以管理员身份打开 PowerShell，粘贴并执行此命令即可完成安装。{{else}}将此命令复制到客户端 VPS 上执行即可完成安装与注册。{{end}}{{end}}</div>
   </div>
 </div>
 
@@ -2888,7 +2900,16 @@ if (genForm) genForm.addEventListener('submit', function(e) {
       var cmdTip = document.getElementById('cmdTip');
       if (cmdText) cmdText.value = cmd;
       if (cmdBox) cmdBox.style.display = cmd ? 'flex' : 'none';
-      if (cmdTip) cmdTip.textContent = cmd ? '将此命令复制到客户端 VPS 上执行即可完成安装与注册。' : '';
+      if (cmdTip) {
+        if (cmd) {
+          var platform = resp.gen_platform || 'linux';
+          cmdTip.textContent = platform === 'windows'
+            ? '以管理员身份打开 PowerShell，粘贴并执行此命令即可完成安装。'
+            : '将此命令复制到客户端 VPS 上执行即可完成安装与注册。';
+        } else {
+          cmdTip.textContent = '';
+        }
+      }
       document.getElementById('genModal').classList.add('open');
       if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.history.replaceState) {
         window.history.replaceState({}, document.title, PANEL_PATH);
@@ -3141,6 +3162,7 @@ if (location.search.indexOf('gen_cmd=') !== -1 && window.history && window.histo
 			GenName:              genName,
 			GenRemark:            genRemark,
 			GenVersion:           genVersion,
+			GenPlatform:          genPlatform,
 			GeneratedCmd:         generatedCmd,
 		})
 	}
@@ -3152,23 +3174,45 @@ func handleGenInstallCmd(panelPath string, cfg *Config) http.HandlerFunc {
 		name := strings.TrimSpace(r.Form.Get("gen_name"))
 		remark := strings.TrimSpace(r.Form.Get("gen_remark"))
 		version := strings.TrimSpace(r.Form.Get("gen_version"))
+		platform := strings.TrimSpace(r.Form.Get("gen_platform"))
 		if version == "" {
 			version = "latest"
+		}
+		if platform != "windows" {
+			platform = "linux"
 		}
 		q := url.Values{}
 		q.Set("gen_name", name)
 		q.Set("gen_remark", remark)
 		q.Set("gen_version", version)
+		q.Set("gen_platform", platform)
 		if name != "" {
 			panelURL := fmt.Sprintf("%s://%s", requestScheme(r), r.Host)
-			cmd := "curl --proto '=https' --tlsv1.2 -fsSL " +
-				"https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --" +
-				" --server-url " + panelURL +
-				" --init-token " + cfg.InitToken +
-				" --client-name '" + strings.ReplaceAll(name, "'", "'\\''") + "'" +
-				" --version " + version
-			if remark != "" {
-				cmd += " --remark '" + strings.ReplaceAll(remark, "'", "'\\''") + "'"
+			var cmd string
+			if platform == "windows" {
+				// PowerShell one-liner: download and invoke the PS1 install script
+				psName := strings.ReplaceAll(name, "'", "''")   // escape single quotes for PS
+				psRemark := strings.ReplaceAll(remark, "'", "'")
+				scriptURL := "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.ps1"
+				cmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing '` +
+					scriptURL + `').Content)) -ServerUrl '` + panelURL +
+					`' -InitToken '` + cfg.InitToken +
+					`' -ClientName '` + psName +
+					`' -Version '` + version + `'`
+				if remark != "" {
+					cmd += ` -Remark '` + psRemark + `'`
+				}
+				cmd += `"`
+			} else {
+				cmd = "curl --proto '=https' --tlsv1.2 -fsSL " +
+					"https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s --" +
+					" --server-url " + panelURL +
+					" --init-token " + cfg.InitToken +
+					" --client-name '" + strings.ReplaceAll(name, "'", "'\\''") + "'" +
+					" --version " + version
+				if remark != "" {
+					cmd += " --remark '" + strings.ReplaceAll(remark, "'", "'\\''") + "'"
+				}
 			}
 			q.Set("gen_cmd", cmd)
 			if strings.Contains(r.Header.Get("Accept"), "application/json") {
@@ -3178,6 +3222,7 @@ func handleGenInstallCmd(panelPath string, cfg *Config) http.HandlerFunc {
 					"gen_name":      name,
 					"gen_remark":    remark,
 					"gen_version":   version,
+					"gen_platform":  platform,
 					"generated_cmd": cmd,
 				})
 				return
