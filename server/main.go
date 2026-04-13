@@ -82,6 +82,10 @@ type Task struct {
 	RetryCount    int
 	ParentTaskID  string
 	TemplateName  string
+	// Peer-transfer fields
+	PeerClientID string // ID of the other client in a peer task
+	PeerRole     string // "source" (listen) or "target" (connect)
+	PeerAddr     string // host:port reported by source; filled in for target before dispatch
 }
 
 type TaskTemplate struct {
@@ -139,6 +143,9 @@ type AssignResp struct {
 	DurationSec int    `json:"duration_sec"`
 	Density     int    `json:"density"`
 	DataAddr    string `json:"data_addr"`
+	// Peer-transfer fields
+	PeerRole string `json:"peer_role,omitempty"` // "source" or "target"
+	PeerAddr string `json:"peer_addr,omitempty"` // for target: address of source to connect
 }
 
 type ControlResp struct {
@@ -171,6 +178,7 @@ var taskModeLabels = map[string]string{
 	"browse":      "网页浏览",
 	"stream":      "流媒体",
 	"backup":      "备份同步",
+	"peer":        "对传",
 }
 
 func normalizeTaskMode(mode string) string {
@@ -430,6 +438,7 @@ func main() {
 	mux.HandleFunc("/api/task/result", jsonHandler(handleTaskResult(&cfg, db, broker)))
 	mux.HandleFunc("/api/task/control", jsonHandler(handleTaskControl(db)))
 	mux.HandleFunc("/api/task/progress", jsonHandler(handleTaskProgress(db)))
+	mux.HandleFunc("/api/peer/addr", jsonHandler(handlePeerAddr(db, broker)))
 	mux.HandleFunc("/api/data", jsonHandler(handleAPIData(db)))
 
 	p := cfg.PanelPath
@@ -441,6 +450,7 @@ func main() {
 	mux.Handle(p+"/client/bulk-delete", basicAuth(cfg, http.HandlerFunc(handleBulkDeleteClients(p, db, broker))))
 	mux.Handle(p+"/client/bulk-restart", basicAuth(cfg, http.HandlerFunc(handleBulkRestartClients(p, db, broker))))
 	mux.Handle(p+"/task/create", basicAuth(cfg, http.HandlerFunc(handleCreateTask(p, &cfg, db, broker))))
+	mux.Handle(p+"/task/peer-create", basicAuth(cfg, http.HandlerFunc(handleCreatePeerTask(p, &cfg, db, broker))))
 	mux.Handle(p+"/task/stop", basicAuth(cfg, http.HandlerFunc(handleStopTask(p, db, broker))))
 	mux.Handle(p+"/task/stop-all", basicAuth(cfg, http.HandlerFunc(handleStopAllTasks(p, db, broker))))
 	mux.Handle(p+"/task/delete", basicAuth(cfg, http.HandlerFunc(handleDeleteTask(p, db, broker))))
@@ -605,6 +615,10 @@ func mustInitDB(path string) *sql.DB {
 		`ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE tasks ADD COLUMN template_name TEXT NOT NULL DEFAULT '';`,
+		// Peer-transfer columns
+		`ALTER TABLE tasks ADD COLUMN peer_client_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE tasks ADD COLUMN peer_role TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE tasks ADD COLUMN peer_addr TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS task_templates(
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -904,9 +918,9 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			if taskStatus(db, currentTask) == "running" {
 				var rt Task
 				err = db.QueryRow(`
-					SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,started_at
+					SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,started_at,peer_role,peer_addr
 					FROM tasks WHERE id=?`, currentTask).
-					Scan(&rt.ID, &rt.ClientID, &rt.Mode, &rt.UpMbps, &rt.DownMbps, &rt.DurationSec, &rt.Density, &rt.StartedAt)
+					Scan(&rt.ID, &rt.ClientID, &rt.Mode, &rt.UpMbps, &rt.DownMbps, &rt.DurationSec, &rt.Density, &rt.StartedAt, &rt.PeerRole, &rt.PeerAddr)
 				if err == nil && rt.StartedAt != "" {
 					started, _ := time.Parse(time.RFC3339, rt.StartedAt)
 					elapsed := int(time.Since(started).Seconds())
@@ -918,6 +932,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 						_ = json.NewEncoder(w).Encode(AssignResp{
 							ID: rt.ID, Mode: rt.Mode, UpMbps: rt.UpMbps, DownMbps: rt.DownMbps,
 							DurationSec: rt.DurationSec - elapsed, Density: rt.Density, DataAddr: addr,
+							PeerRole: rt.PeerRole, PeerAddr: rt.PeerAddr,
 						})
 						return
 					}
@@ -934,11 +949,13 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 			_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
 		}
 		var t Task
+		// For peer target tasks: only dispatch when source has already reported its address.
 		err = db.QueryRow(`
-			SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at
+			SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,peer_role,peer_addr,peer_client_id
 			FROM tasks WHERE client_id=? AND status='pending'
+			AND (mode != 'peer' OR peer_role = 'source' OR (peer_role = 'target' AND peer_addr != ''))
 			ORDER BY created_at ASC LIMIT 1`, clientID).
-			Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt)
+			Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt, &t.PeerRole, &t.PeerAddr, &t.PeerClientID)
 		if err == sql.ErrNoRows {
 			w.WriteHeader(204)
 			return
@@ -963,6 +980,7 @@ func handleNextTask(cfg Config, db *sql.DB, broker *Broker) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(AssignResp{
 			ID: t.ID, Mode: t.Mode, UpMbps: t.UpMbps, DownMbps: t.DownMbps,
 			DurationSec: t.DurationSec, Density: t.Density, DataAddr: addr,
+			PeerRole: t.PeerRole, PeerAddr: t.PeerAddr,
 		})
 	}
 }
@@ -1105,6 +1123,9 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 			RetryCount    int     `json:"retry_count"`
 			ParentTaskID  string  `json:"parent_task_id"`
 			TemplateName  string  `json:"template_name"`
+			PeerClientID  string  `json:"peer_client_id,omitempty"`
+			PeerRole      string  `json:"peer_role,omitempty"`
+			PeerClientName string `json:"peer_client_name,omitempty"`
 		}
 		statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
 		modeFilter := normalizeTaskMode(strings.TrimSpace(r.URL.Query().Get("mode")))
@@ -1159,6 +1180,9 @@ func handleAPIData(db *sql.DB) http.HandlerFunc {
 				UploadBytes:   t.UploadBytes,
 				DownloadBytes: t.DownloadBytes,
 				MaxRetries:    t.MaxRetries, RetryCount: t.RetryCount, ParentTaskID: t.ParentTaskID, TemplateName: t.TemplateName,
+				PeerClientID:   t.PeerClientID,
+				PeerRole:       t.PeerRole,
+				PeerClientName: clientNames[t.PeerClientID],
 			})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"clients": cj, "tasks": tj})
@@ -1494,20 +1518,20 @@ body {
 }
 /* ── Nav ── */
 .nav {
-  position: sticky; top: 0; z-index: 200; height: 60px;
-  display: flex; align-items: center; gap: 12px; padding: 0 24px;
+  position: sticky; top: 0; z-index: 200; height: 52px;
+  display: flex; align-items: center; gap: 10px; padding: 0 20px;
   background: var(--surf); border-bottom: 1px solid var(--bdr);
   box-shadow: 0 1px 0 var(--bdr);
 }
 .nav-logo {
   display: flex; align-items: center; gap: 10px;
-  font-weight: 800; font-size: 17px; letter-spacing: -.03em;
+  font-weight: 800; font-size: 16px; letter-spacing: -.03em;
   text-decoration: none; color: var(--tx);
 }
 .nav-icon {
-  width: 34px; height: 34px; background: linear-gradient(135deg, var(--primary), var(--primary-dk));
-  border-radius: 9px; display: flex; align-items: center; justify-content: center;
-  font-size: 17px; box-shadow: 0 3px 10px var(--primary-glow); flex-shrink: 0;
+  width: 32px; height: 32px; background: linear-gradient(135deg, var(--primary), var(--primary-dk));
+  border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; box-shadow: 0 3px 10px var(--primary-glow); flex-shrink: 0;
 }
 .ver-badge {
   display: inline-flex; align-items: center; padding: 2px 8px;
@@ -1525,6 +1549,32 @@ body {
   50% { opacity:.6; box-shadow:0 0 0 5px rgba(16,185,129,0); }
 }
 .nav-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* ── Dropdown menu ── */
+.dropdown { position: relative; display: inline-flex; }
+.dropdown-menu {
+  display: none; position: absolute; top: calc(100% + 6px); right: 0;
+  background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--r);
+  box-shadow: var(--sh-lg); min-width: 150px; z-index: 300; overflow: hidden;
+}
+.dropdown.open .dropdown-menu { display: block; }
+.dropdown-item {
+  display: flex; align-items: center; gap: 8px; padding: 9px 14px;
+  font-size: 13px; font-weight: 500; color: var(--tx2); cursor: pointer;
+  border: none; background: none; width: 100%; text-align: left; font-family: inherit;
+  text-decoration: none; white-space: nowrap;
+  transition: background .1s;
+}
+.dropdown-item:hover { background: var(--surf2); color: var(--tx); transform: none; filter: none; }
+/* ── Peer transfer badge ── */
+.peer-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px;
+  background: rgba(99,102,241,.12); color: var(--primary); border-radius: var(--r-pill);
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+/* ── Name cell with sub-info ── */
+.name-cell { display: flex; flex-direction: column; gap: 2px; }
+.name-cell-main { font-weight: 600; }
+.name-cell-sub { font-size: 11px; color: var(--tx3); display: flex; gap: 6px; flex-wrap: wrap; }
 /* ── Page ── */
 .wrap { max-width: 1440px; margin: 0 auto; padding: 24px 24px 60px; }
 /* ── Card ── */
@@ -1698,7 +1748,7 @@ input:focus, select:focus, textarea:focus {
 @media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 768px) {
   .wrap { padding: 12px 12px 40px; }
-  .nav { padding: 0 14px; height: auto; min-height: 60px; flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; }
+  .nav { padding: 0 14px; height: auto; min-height: 52px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
   .nav-acts { order: 3; width: 100%; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
   th { display: none; }
@@ -1707,6 +1757,7 @@ input:focus, select:focus, textarea:focus {
   tr { display: block; border: 1px solid var(--bdr); border-radius: 10px; margin-bottom: 8px; padding: 6px 0; }
   tbody tr:hover td { background: transparent; }
   .grid { grid-template-columns: 1fr; }
+  .ssh-col { display: none !important; }
 }
 @media (max-width: 480px) { .stats-grid { grid-template-columns: 1fr; } }
 </style>
@@ -1726,12 +1777,18 @@ input:focus, select:focus, textarea:focus {
     <span id="liveStatus">同步中...</span>
   </div>
   <div class="nav-acts">
-    <button type="button" id="reloadBtn" class="sec">🔄 刷新</button>
-    <button type="button" class="sec" id="toggleHistoryBtn">📜 历史任务</button>
-    <button type="button" class="warn" id="upgradeAllBtn">🚀 一键升级</button>
     <button type="button" class="info" onclick="document.getElementById('genModal').classList.add('open')">➕ 接入客户端</button>
-    <a class="btn sec" href="{{.PanelPath}}/settings">⚙️ 设置</a>
-    <a class="btn sec" href="{{.PanelPath}}/server">🐧 服务器</a>
+    <button type="button" id="openPeerModalBtn" style="background:var(--primary)">⚡ 对传</button>
+    <button type="button" class="warn" id="upgradeAllBtn">🚀 一键升级</button>
+    <div class="dropdown" id="moreDropdown">
+      <button type="button" class="sec" id="moreBtn">⋯ 更多</button>
+      <div class="dropdown-menu">
+        <button type="button" class="dropdown-item" id="reloadBtn">🔄 刷新</button>
+        <button type="button" class="dropdown-item" id="toggleHistoryBtn">📜 历史任务</button>
+        <a class="dropdown-item" href="{{.PanelPath}}/settings">⚙️ 设置</a>
+        <a class="dropdown-item" href="{{.PanelPath}}/server">🐧 服务器</a>
+      </div>
+    </div>
   </div>
 </nav>
 
@@ -1848,6 +1905,60 @@ input:focus, select:focus, textarea:focus {
   </div>
 </div>
 
+<!-- ── 对传任务弹窗 ───────────────────────────────────────────────── -->
+<div id="peerModal" class="modal-overlay">
+  <div class="modal-inner" style="width:min(520px,95vw)">
+    <div class="modal-hd">
+      <span class="modal-title">⚡ 创建对传任务</span>
+      <button type="button" class="modal-x" onclick="document.getElementById('peerModal').classList.remove('open')">✕</button>
+    </div>
+    <p style="margin-bottom:16px;font-size:13px;color:var(--tx3)">
+      两台客户端直接建立 TCP 连接互相传输数据，不经过服务端，真实测量端到端带宽。
+    </p>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px">
+      <div style="flex:1">
+        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">源端（主动监听）</label>
+        <select id="peerSourceSelect" style="width:100%;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px">
+          <option value="">请选择客户端</option>
+          {{range .ApprovedClients}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+        </select>
+      </div>
+      <div style="font-size:20px;padding-top:18px;color:var(--primary);flex-shrink:0">↔</div>
+      <div style="flex:1">
+        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">目标端（主动连接）</label>
+        <select id="peerTargetSelect" style="width:100%;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px">
+          <option value="">请选择客户端</option>
+          {{range .ApprovedClients}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:16px">
+      <div style="flex:1">
+        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">传输速率 (Mbps)</label>
+        <input id="peerMbps" type="number" value="100" min="1" max="100000" style="width:100%">
+      </div>
+      <div style="flex:1">
+        <label style="font-size:12px;font-weight:600;color:var(--tx2);display:block;margin-bottom:4px">时长</label>
+        <div style="display:flex;gap:6px">
+          <input id="peerDurVal" type="number" value="1" min="1" style="flex:1">
+          <select id="peerDurUnit" style="width:auto;min-width:72px;padding:9px 11px;border:1.5px solid var(--bdr);border-radius:var(--r-sm);background:var(--surf);color:var(--tx);font-size:13px;flex-shrink:0">
+            <option value="sec">秒</option>
+            <option value="min" selected>分</option>
+            <option value="hour">时</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--tx3);margin-bottom:16px;padding:10px;background:var(--surf2);border-radius:var(--r-sm)">
+      💡 注意：源端需要有公网 IP 或与目标端处于同一网络，否则目标端无法连接。
+    </div>
+    <div style="display:flex;gap:8px">
+      <button type="button" id="confirmPeerBtn" style="background:var(--primary)">⚡ 创建对传</button>
+      <button type="button" class="sec" onclick="document.getElementById('peerModal').classList.remove('open')">取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── 接入新客户端弹窗 ───────────────────────────────────────────── -->
 <div id="genModal" class="modal-overlay {{if .GeneratedCmd}}open{{end}}">
   <div class="modal-inner">
@@ -1897,6 +2008,7 @@ input:focus, select:focus, textarea:focus {
     <div class="card-hd-right" style="font-size:12px">
       <button type="button" class="sec" id="selectAllClientsBtn">全选任务目标</button>
       <button type="button" class="sec" id="deselectAllClientsBtn">清空选择</button>
+      <button type="button" class="sec" id="toggleSshColBtn" title="显示/隐藏 SSH 尝试次数列">🔒 SSH列</button>
       <button type="button" class="warn" id="bulkRestartClientsBtn">批量重启客户端</button>
       <button type="button" class="danger" id="bulkDeleteClientsBtn">批量删除客户端</button>
     </div>
@@ -1904,20 +2016,29 @@ input:focus, select:focus, textarea:focus {
   <div class="tbl-wrap">
   <table>
     <thead><tr>
-      <th><label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:inherit;font-size:inherit;font-weight:inherit;cursor:pointer"><input type="checkbox" id="clientSelectAllToggle" aria-label="全选客户端" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">全选</label></th><th>名称</th><th>版本</th><th>备注</th><th>批准</th>
-      <th>分组/标签</th><th>延迟</th><th>SSH尝试(1h)</th><th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
+      <th><label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:inherit;font-size:inherit;font-weight:inherit;cursor:pointer"><input type="checkbox" id="clientSelectAllToggle" aria-label="全选客户端" style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">全选</label></th>
+      <th>名称 / 分组 / 标签</th><th>版本</th><th>批准</th><th>延迟</th>
+      <th class="ssh-col" style="display:none">SSH尝试(1h)</th>
+      <th>心跳</th><th>IP</th><th>当前任务</th><th>操作</th>
     </tr></thead>
     <tbody id="clientBody">
     {{range .Clients}}
     <tr data-client-id="{{.ID}}" data-last-seen="{{.LastSeen}}" data-name="{{.Name}}" data-remark="{{.Remark}}" data-group-name="{{.GroupName}}" data-tags="{{.Tags}}" data-latency="{{.Latency}}" data-ssh-attempts="{{.SSHAttempts}}" data-approved="{{if .Approved}}1{{else}}0{{end}}" data-upgrade-to="{{.UpgradeTo}}">
       <td data-label="选择" class="select-col">{{if .Approved}}<input type="checkbox" class="task-client-checkbox" value="{{.ID}}" aria-label="选择客户端 {{.Name}}" {{if eq .ID $.DefaultClientID}}checked{{end}} style="width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--primary)">{{else}}-{{end}}</td>
-      <td data-label="名称" class="name-col"><strong style="font-weight:600">{{.Name}}</strong></td>
+      <td data-label="名称" class="name-col">
+        <div class="name-cell">
+          <div class="name-cell-main">{{.Name}}</div>
+          <div class="name-cell-sub">
+            {{if .GroupName}}<span>📁 {{.GroupName}}</span>{{end}}
+            {{if .Tags}}<span>🏷 {{.Tags}}</span>{{end}}
+            {{if .Remark}}<span style="font-style:italic">{{.Remark}}</span>{{end}}
+          </div>
+        </div>
+      </td>
       <td data-label="版本"><code style="font-size:11px;background:var(--surf2);padding:2px 7px;border-radius:5px;border:1px solid var(--bdr);font-family:monospace">{{.Version}}</code></td>
-      <td data-label="备注" class="remark-col" style="color:var(--tx2)">{{.Remark}}</td>
       <td data-label="批准" class="approve-col">{{if .Approved}}<span class="badge done">YES</span>{{else}}<span class="badge pending">NO</span>{{end}}</td>
-      <td data-label="分组/标签" class="group-tags-col" style="color:var(--tx2)">{{if .GroupName}}<div>📁 {{.GroupName}}</div>{{end}}{{if .Tags}}<div>🏷 {{.Tags}}</div>{{end}}</td>
       <td data-label="延迟" class="ping-col">{{if gt .Latency 0}}{{.Latency}} ms{{else}}-{{end}}</td>
-      <td data-label="SSH尝试" class="sshattempt-col">{{.SSHAttempts}}</td>
+      <td data-label="SSH尝试" class="sshattempt-col ssh-col" style="display:none">{{.SSHAttempts}}</td>
       <td data-label="心跳" class="lastseen-col" style="color:var(--tx3);font-size:12px">{{.LastSeen | shortTime}}</td>
       <td data-label="IP" class="ip-col" style="font-family:monospace;font-size:12px;color:var(--tx2)">{{.RemoteIP}}</td>
       <td data-label="任务" class="curtask-col" style="font-family:monospace;font-size:11px;color:var(--tx3)">{{.CurrentTask}}</td>
@@ -2038,19 +2159,18 @@ input:focus, select:focus, textarea:focus {
   <div class="toolbar" style="margin-bottom:14px">
     <input id="taskSearchInput" placeholder="搜索任务ID / 客户端 / 模式 / 模板">
     <select id="taskStatusFilter"><option value="">全部状态</option><option value="scheduled">scheduled</option><option value="pending">pending</option><option value="running">running</option><option value="stopping">stopping</option><option value="stopped">stopped</option><option value="done">done</option></select>
-    <select id="taskModeFilter"><option value="">全部模式</option><option value="upload">upload</option><option value="download">download</option><option value="traditional">traditional</option><option value="browse">browse</option><option value="stream">stream</option><option value="backup">backup</option></select>
+    <select id="taskModeFilter"><option value="">全部模式</option><option value="upload">upload</option><option value="download">download</option><option value="traditional">traditional</option><option value="browse">browse</option><option value="stream">stream</option><option value="backup">backup</option><option value="peer">peer</option></select>
     <select id="taskClientFilter"><option value="">全部客户端</option>{{range .ApprovedClients}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>
   </div>
   <div class="tbl-wrap">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>密度</th><th>状态</th><th>进度</th><th>延迟</th><th>已传</th><th>已拉</th><th>日期</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>速率 ↑↓</th><th>时长</th><th>密度</th><th>状态</th><th>进度</th><th>延迟</th><th>已传</th><th>已拉</th><th>日期</th><th>操作</th></tr></thead>
     <tbody id="runningTaskBody">
     {{range .RunningTasks}}
     <tr data-task-id="{{.ID}}" data-status="{{.Status}}">
-      <td data-label="客户端">{{index $.ClientNames .ClientID}}</td>
+      <td data-label="客户端">{{if .PeerRole}}{{if eq .PeerRole "source"}}{{index $.ClientNames .ClientID}} <span class="peer-badge">源端</span>{{else}}{{index $.ClientNames .ClientID}} <span class="peer-badge">目标</span>{{end}}{{else}}{{index $.ClientNames .ClientID}}{{end}}</td>
       <td data-label="模式">{{modeLabel .Mode}}</td>
-      <td data-label="上传">{{.UpMbps}}</td>
-      <td data-label="下载">{{.DownMbps}}</td>
+      <td data-label="速率">↑{{.UpMbps}}/↓{{.DownMbps}}</td>
       <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
       <td data-label="密度">{{densityLabel .Density}}</td>
       <td data-label="状态"><span class="badge {{.Status}}">{{.Status}}</span></td>
@@ -2069,7 +2189,7 @@ input:focus, select:focus, textarea:focus {
       </td>
     </tr>
     {{end}}
-    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="13" style="text-align:center;color:var(--tx3);padding:48px 20px">
+    {{if eq (len .RunningTasks) 0}}<tr id="noRunningRow"><td colspan="12" style="text-align:center;color:var(--tx3);padding:48px 20px">
       <div style="font-size:30px;margin-bottom:8px;opacity:.35">⚡</div>
       <div style="font-size:14px">暂无正在执行的任务</div>
     </td></tr>{{end}}
@@ -2091,14 +2211,13 @@ input:focus, select:focus, textarea:focus {
   </div>
   <div class="tbl-wrap">
   <table>
-    <thead><tr><th>客户端</th><th>模式</th><th>上传</th><th>下载</th><th>时长</th><th>密度</th><th>状态</th><th>已传</th><th>已拉</th><th>开始</th><th>结束</th><th>操作</th></tr></thead>
+    <thead><tr><th>客户端</th><th>模式</th><th>速率 ↑↓</th><th>时长</th><th>密度</th><th>状态</th><th>已传</th><th>已拉</th><th>开始</th><th>结束</th><th>操作</th></tr></thead>
     <tbody id="historyTaskBody">
     {{range .HistoryTasks}}
     <tr data-task-id="{{.ID}}">
-      <td data-label="客户端">{{index $.ClientNames .ClientID}}</td>
+      <td data-label="客户端">{{if .PeerRole}}{{if eq .PeerRole "source"}}{{index $.ClientNames .ClientID}} <span class="peer-badge">源端</span>{{else}}{{index $.ClientNames .ClientID}} <span class="peer-badge">目标</span>{{end}}{{else}}{{index $.ClientNames .ClientID}}{{end}}</td>
       <td data-label="模式">{{modeLabel .Mode}}</td>
-      <td data-label="上传">{{.UpMbps}}</td>
-      <td data-label="下载">{{.DownMbps}}</td>
+      <td data-label="速率">↑{{.UpMbps}}/↓{{.DownMbps}}</td>
       <td data-label="时长">{{.DurationSec | fmtDurationHTML}}</td>
       <td data-label="密度">{{densityLabel .Density}}</td>
       <td data-label="状态"><span class="badge {{.Status}}">{{.Status}}</span></td>
@@ -2110,13 +2229,13 @@ input:focus, select:focus, textarea:focus {
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           <button type="button" class="info view-logs-btn" data-task-id="{{.ID}}">📄 日志</button>
           <button type="button" class="danger del-task-btn" data-task-id="{{.ID}}">🗑 删除</button>
-          <button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">🔄 克隆</button>
-          <button type="button" class="sec save-template-row-btn" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">💾 模板</button>
+          {{if not .PeerRole}}<button type="button" class="sec clone-btn" data-id="{{.ID}}" data-client="{{.ClientID}}" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">🔄 克隆</button>
+          <button type="button" class="sec save-template-row-btn" data-mode="{{.Mode}}" data-up="{{.UpMbps}}" data-down="{{.DownMbps}}" data-dur="{{.DurationSec}}" data-density="{{.Density}}" data-max-retries="{{.MaxRetries}}" data-template-name="{{.TemplateName}}">💾 模板</button>{{end}}
         </div>
       </td>
     </tr>
     {{end}}
-    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="12" style="text-align:center;color:var(--tx3);padding:48px 20px">
+    {{if eq (len .HistoryTasks) 0}}<tr id="noHistoryRow"><td colspan="11" style="text-align:center;color:var(--tx3);padding:48px 20px">
       <div style="font-size:30px;margin-bottom:8px;opacity:.35">📋</div>
       <div style="font-size:14px">暂无历史记录</div>
     </td></tr>{{end}}
@@ -2307,6 +2426,8 @@ function modeLabel(mode) {
       return '流媒体';
     case 'backup':
       return '备份同步';
+    case 'peer':
+      return '对传';
     default:
       return mode || '-';
   }
@@ -2396,6 +2517,8 @@ function buildProgress(t) {
 // 动态行：停止按钮输出为 form，保证无 JS 也可提交
 function buildRunningRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
+  if (t.peer_role === 'source') name += ' <span class="peer-badge">源端</span>';
+  else if (t.peer_role === 'target') name += ' <span class="peer-badge">目标</span>';
   var stopBtn = t.status === 'running'
     ? '<button type="button" class="danger stop-btn" data-task-id="'+t.id+'">🛑 停止</button>'
     : t.status === 'pending'
@@ -2405,8 +2528,7 @@ function buildRunningRow(t) {
   return '<tr data-task-id="' + t.id + '" data-status="' + t.status + '">'
     + '<td data-label="客户端">' + name + '</td>'
     + '<td data-label="模式">' + modeLabel(t.mode) + '</td>'
-    + '<td data-label="上传">' + t.up_mbps + '</td>'
-    + '<td data-label="下载">' + t.down_mbps + '</td>'
+    + '<td data-label="速率">↑' + t.up_mbps + '/↓' + t.down_mbps + '</td>'
     + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
     + '<td data-label="密度">' + densityLbl(t.density) + '</td>'
     + '<td data-label="状态"><span class="badge ' + t.status + '">' + t.status + '</span></td>'
@@ -2425,11 +2547,15 @@ function buildRunningRow(t) {
 // 动态行：删除按钮输出为 form，保证无 JS 也可提交
 function buildHistoryRow(t) {
   var name = clientNameMap[t.client_id] || t.client_name || t.client_id;
+  if (t.peer_role === 'source') name += ' <span class="peer-badge">源端</span>';
+  else if (t.peer_role === 'target') name += ' <span class="peer-badge">目标</span>';
+  var cloneBtn = t.peer_role ? '' :
+    '<button type="button" class="sec clone-btn" data-id="'+escapeHTML(t.id)+'" data-client="'+escapeHTML(t.client_id)+'" data-mode="'+escapeHTML(t.mode)+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
+    + '<button type="button" class="sec save-template-row-btn" data-mode="'+escapeHTML(t.mode)+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">💾 模板</button>';
   return '<tr data-task-id="' + t.id + '">'
     + '<td data-label="客户端">' + name + '</td>'
     + '<td data-label="模式">' + modeLabel(t.mode) + '</td>'
-    + '<td data-label="上传">' + t.up_mbps + '</td>'
-    + '<td data-label="下载">' + t.down_mbps + '</td>'
+    + '<td data-label="速率">↑' + t.up_mbps + '/↓' + t.down_mbps + '</td>'
     + '<td data-label="时长">' + fmtDuration(t.duration_sec) + '</td>'
     + '<td data-label="密度">' + densityLbl(t.density) + '</td>'
     + '<td data-label="状态"><span class="badge ' + t.status + '">' + t.status + '</span></td>'
@@ -2440,8 +2566,7 @@ function buildHistoryRow(t) {
     + '<td data-label="操作"><div style="display:flex;gap:4px;flex-wrap:wrap">'
     + '<button type="button" class="info view-logs-btn" data-task-id="'+t.id+'">📄 日志</button>'
     + '<button type="button" class="danger del-task-btn" data-task-id="'+t.id+'">🗑 删除</button>'
-    + '<button type="button" class="sec clone-btn" data-id="'+escapeHTML(t.id)+'" data-client="'+escapeHTML(t.client_id)+'" data-mode="'+escapeHTML(t.mode)+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">🔄 克隆</button>'
-    + '<button type="button" class="sec save-template-row-btn" data-mode="'+escapeHTML(t.mode)+'" data-up="'+t.up_mbps+'" data-down="'+t.down_mbps+'" data-dur="'+t.duration_sec+'" data-density="'+(t.density||0)+'" data-max-retries="'+(t.max_retries||0)+'" data-template-name="'+escapeHTML(t.template_name||'')+'">💾 模板</button>'
+    + cloneBtn
     + '</div></td>'
     + '</tr>';
 }
@@ -2578,12 +2703,19 @@ function pollData() {
         row.dataset.groupName = c.group_name || '';
         row.dataset.tags = c.tags || '';
         if (c.name) clientNameMap[c.id] = c.name;
-        var nameCell = row.querySelector('.name-col strong');
-        if (nameCell && c.name !== undefined) nameCell.textContent = c.name || c.id;
-        var remarkCell = row.querySelector('.remark-col');
-        if (remarkCell && c.remark !== undefined) remarkCell.textContent = c.remark || '';
-        var gtCell = row.querySelector('.group-tags-col');
-        if (gtCell) gtCell.innerHTML = (c.group_name ? '<div>📁 ' + escapeHTML(c.group_name) + '</div>' : '') + (c.tags ? '<div>🏷 ' + escapeHTML(c.tags) + '</div>' : '');
+        var nameCell = row.querySelector('.name-col');
+        if (nameCell) {
+          var mainEl = nameCell.querySelector('.name-cell-main');
+          var subEl = nameCell.querySelector('.name-cell-sub');
+          if (mainEl && c.name !== undefined) mainEl.textContent = c.name || c.id;
+          if (subEl) {
+            var subParts = [];
+            if (c.group_name) subParts.push('<span>📁 ' + escapeHTML(c.group_name) + '</span>');
+            if (c.tags) subParts.push('<span>🏷 ' + escapeHTML(c.tags) + '</span>');
+            if (c.remark) subParts.push('<span style="font-style:italic">' + escapeHTML(c.remark) + '</span>');
+            subEl.innerHTML = subParts.join('');
+          }
+        }
         syncClientApprovalUI(row, !!c.approved);
         row.dataset.lastSeen = c.last_seen || '';
         var lsCol = row.querySelector('.lastseen-col');
@@ -2947,6 +3079,67 @@ var reloadBtnEl = document.getElementById('reloadBtn');
 if (reloadBtnEl) reloadBtnEl.addEventListener('click', function() {
   pollData();
   if (liveStatus) liveStatus.textContent = '\u624b\u52a8\u5237\u65b0\u5b8c\u6210: ' + new Date().toLocaleTimeString();
+});
+
+// ── 下拉菜单 ──
+var moreDropdown = document.getElementById('moreDropdown');
+var moreBtn = document.getElementById('moreBtn');
+if (moreBtn && moreDropdown) {
+  moreBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    moreDropdown.classList.toggle('open');
+  });
+  document.addEventListener('click', function(e) {
+    if (!moreDropdown.contains(e.target)) moreDropdown.classList.remove('open');
+  });
+}
+
+// ── 对传弹窗 ──
+var openPeerModalBtn = document.getElementById('openPeerModalBtn');
+if (openPeerModalBtn) openPeerModalBtn.addEventListener('click', function() {
+  document.getElementById('peerModal').classList.add('open');
+});
+closeModalOnBackdrop('peerModal');
+document.querySelectorAll('.modal-overlay').forEach(function(m) {
+  m.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') m.classList.remove('open');
+  });
+});
+
+bindClick('confirmPeerBtn', function() {
+  var src = document.getElementById('peerSourceSelect').value;
+  var tgt = document.getElementById('peerTargetSelect').value;
+  var mbps = document.getElementById('peerMbps').value;
+  var durVal = document.getElementById('peerDurVal').value;
+  var durUnit = document.getElementById('peerDurUnit').value;
+  if (!src) { alert('请选择源端客户端'); return; }
+  if (!tgt) { alert('请选择目标端客户端'); return; }
+  if (src === tgt) { alert('源端和目标端不能是同一台客户端'); return; }
+  var btn = document.getElementById('confirmPeerBtn');
+  btn.disabled = true;
+  apiFetch('/task/peer-create',
+    'source_client_id=' + encodeURIComponent(src) +
+    '&target_client_id=' + encodeURIComponent(tgt) +
+    '&mbps=' + encodeURIComponent(mbps) +
+    '&duration_val=' + encodeURIComponent(durVal) +
+    '&duration_unit=' + encodeURIComponent(durUnit))
+    .then(function() {
+      document.getElementById('peerModal').classList.remove('open');
+      pollData();
+    })
+    .catch(function(err) { alert('创建对传任务失败: ' + err); })
+    .finally(function() { btn.disabled = false; });
+});
+
+// ── SSH 列显示切换 ──
+var sshColVisible = false;
+var toggleSshColBtn = document.getElementById('toggleSshColBtn');
+if (toggleSshColBtn) toggleSshColBtn.addEventListener('click', function() {
+  sshColVisible = !sshColVisible;
+  document.querySelectorAll('.ssh-col').forEach(function(el) {
+    el.style.display = sshColVisible ? '' : 'none';
+  });
+  toggleSshColBtn.textContent = sshColVisible ? '🔒 SSH列 ✓' : '🔒 SSH列';
 });
 
 var historyOpen = false;
@@ -3542,8 +3735,8 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		taskID := r.Form.Get("task_id")
-		var status, clientID string
-		_ = db.QueryRow(`SELECT status, client_id FROM tasks WHERE id=?`, taskID).Scan(&status, &clientID)
+		var status, clientID, peerRole string
+		_ = db.QueryRow(`SELECT status, client_id, peer_role FROM tasks WHERE id=?`, taskID).Scan(&status, &clientID, &peerRole)
 		now := time.Now().Format(time.RFC3339)
 		switch status {
 		case "running":
@@ -3552,6 +3745,40 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 			_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, taskID)
 			if clientID != "" {
 				_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, clientID)
+			}
+		}
+		// For peer tasks: also stop the linked peer task (source stops target and vice versa).
+		if peerRole == "source" {
+			// Stop target task that has this task as parent
+			var targetID, targetStatus, targetClientID string
+			_ = db.QueryRow(`SELECT id, status, client_id FROM tasks WHERE parent_task_id=? AND peer_role='target'`, taskID).
+				Scan(&targetID, &targetStatus, &targetClientID)
+			if targetID != "" {
+				switch targetStatus {
+				case "running":
+					_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=?`, targetID)
+				case "pending":
+					_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, targetID)
+					if targetClientID != "" {
+						_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, targetClientID)
+					}
+				}
+			}
+		} else if peerRole == "target" {
+			// Stop the source task (parent)
+			var sourceID, sourceStatus, sourceClientID string
+			_ = db.QueryRow(`SELECT id, status, client_id FROM tasks WHERE id=(SELECT parent_task_id FROM tasks WHERE id=?)`, taskID).
+				Scan(&sourceID, &sourceStatus, &sourceClientID)
+			if sourceID != "" {
+				switch sourceStatus {
+				case "running":
+					_, _ = db.Exec(`UPDATE tasks SET status='stopping' WHERE id=?`, sourceID)
+				case "pending":
+					_, _ = db.Exec(`UPDATE tasks SET status='stopped', finished_at=?, started_at=COALESCE(NULLIF(started_at,''), created_at) WHERE id=?`, now, sourceID)
+					if sourceClientID != "" {
+						_, _ = db.Exec(`UPDATE clients SET current_task='' WHERE id=?`, sourceClientID)
+					}
+				}
 			}
 		}
 		broker.Publish("tasks")
@@ -3666,6 +3893,131 @@ func handleClearHistory(panelPath string, db *sql.DB, broker *Broker) http.Handl
 	}
 }
 
+// ── Peer Transfer Handlers ────────────────────────────────────────────────────
+
+// handlePeerAddr is called by the source client to report its listening address.
+// The server stores this address in the linked target task so that the target
+// client can connect to it directly.
+func handlePeerAddr(db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ClientID    string `json:"client_id"`
+			ClientToken string `json:"client_token"`
+			TaskID      string `json:"task_id"`
+			Port        string `json:"port"` // port the source is listening on
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		// Authenticate the client
+		var token string
+		var approved int
+		err := db.QueryRow(`SELECT token, approved FROM clients WHERE id=?`, req.ClientID).
+			Scan(&token, &approved)
+		if err != nil || token != req.ClientToken || approved != 1 {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		// Verify this task belongs to this client and is a peer source task
+		var peerRole, clientID string
+		err = db.QueryRow(`SELECT peer_role, client_id FROM tasks WHERE id=?`, req.TaskID).
+			Scan(&peerRole, &clientID)
+		if err != nil || clientID != req.ClientID || peerRole != "source" {
+			http.Error(w, "task not found or not a peer source task", 400)
+			return
+		}
+		// Build the peer address from the client's known remote IP + reported port
+		var remoteIP string
+		_ = db.QueryRow(`SELECT remote_ip FROM clients WHERE id=?`, req.ClientID).Scan(&remoteIP)
+		// remoteIP may include port (from r.RemoteAddr), strip it
+		host, _, err2 := net.SplitHostPort(remoteIP)
+		if err2 != nil {
+			host = remoteIP // already plain IP
+		}
+		peerAddr := net.JoinHostPort(host, req.Port)
+		// Update the target task's peer_addr so it can be dispatched
+		_, _ = db.Exec(`UPDATE tasks SET peer_addr=? WHERE parent_task_id=? AND peer_role='target'`, peerAddr, req.TaskID)
+		broker.Publish("tasks")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "peer_addr": peerAddr})
+	}
+}
+
+// handleCreatePeerTask creates a pair of linked peer tasks (source + target).
+func handleCreatePeerTask(panelPath string, cfg *Config, db *sql.DB, broker *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		sourceClientID := strings.TrimSpace(r.Form.Get("source_client_id"))
+		targetClientID := strings.TrimSpace(r.Form.Get("target_client_id"))
+		if sourceClientID == "" || targetClientID == "" {
+			http.Error(w, "source_client_id and target_client_id are required", 400)
+			return
+		}
+		if sourceClientID == targetClientID {
+			http.Error(w, "source and target must be different clients", 400)
+			return
+		}
+		mbps, _ := strconv.Atoi(r.Form.Get("mbps"))
+		if mbps <= 0 {
+			mbps = 10
+		}
+		const maxMbps = 100000
+		if mbps > maxMbps {
+			http.Error(w, fmt.Sprintf("mbps out of range [1, %d]", maxMbps), 400)
+			return
+		}
+		durVal, _ := strconv.Atoi(r.Form.Get("duration_val"))
+		durUnit := r.Form.Get("duration_unit")
+		dur := durationToSec(durVal, durUnit)
+		const minDurSec = 5
+		const maxDurSec = 86400 * 30
+		if dur < minDurSec || dur > maxDurSec {
+			http.Error(w, fmt.Sprintf("duration out of range [%ds, %ds]", minDurSec, maxDurSec), 400)
+			return
+		}
+		// Verify both clients are approved
+		var srcApproved, dstApproved int
+		_ = db.QueryRow(`SELECT approved FROM clients WHERE id=?`, sourceClientID).Scan(&srcApproved)
+		_ = db.QueryRow(`SELECT approved FROM clients WHERE id=?`, targetClientID).Scan(&dstApproved)
+		if srcApproved != 1 || dstApproved != 1 {
+			http.Error(w, "both clients must be approved", 400)
+			return
+		}
+		now := time.Now().Format(time.RFC3339)
+		sourceID := genToken(8)
+		targetID := genToken(8)
+		// Create source task (listens for connection)
+		_, err := db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,scheduled_at,max_retries,retry_count,parent_task_id,template_name,peer_client_id,peer_role,peer_addr)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			sourceID, sourceClientID, "peer", mbps, mbps, dur, 0, "pending", now, "", 0, 0, "", "", targetClientID, "source", "")
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		// Create target task (connects to source; parent_task_id links to source for addr lookup)
+		_, err = db.Exec(`INSERT INTO tasks(id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,scheduled_at,max_retries,retry_count,parent_task_id,template_name,peer_client_id,peer_role,peer_addr)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			targetID, targetClientID, "peer", mbps, mbps, dur, 0, "pending", now, "", 0, 0, sourceID, "", sourceClientID, "target", "")
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		broker.Publish("tasks")
+		srcName := sourceClientID
+		dstName := targetClientID
+		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, sourceClientID).Scan(&srcName)
+		_ = db.QueryRow(`SELECT name FROM clients WHERE id=?`, targetClientID).Scan(&dstName)
+		go barkPush(cfg.BarkURL, "对传任务已创建",
+			fmt.Sprintf("%s ↔ %s 对传任务已创建\n速率:%dMbps 时长:%ds", srcName, dstName, mbps, dur))
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "source_id": sourceID, "target_id": targetID})
+			return
+		}
+		http.Redirect(w, r, panelPath, http.StatusFound)
+	}
+}
+
 func handlePushUpgrade(panelPath string, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -3754,7 +4106,7 @@ func mustClients(db *sql.DB) []Client {
 }
 
 func mustTasks(db *sql.DB) []Task {
-	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,started_at,finished_at,scheduled_at,upload_bytes,download_bytes,logs,max_retries,retry_count,parent_task_id,template_name FROM tasks`)
+	rows, err := db.Query(`SELECT id,client_id,mode,up_mbps,down_mbps,duration_sec,density,status,created_at,started_at,finished_at,scheduled_at,upload_bytes,download_bytes,logs,max_retries,retry_count,parent_task_id,template_name,peer_client_id,peer_role,peer_addr FROM tasks`)
 	if err != nil {
 		return nil
 	}
@@ -3762,7 +4114,7 @@ func mustTasks(db *sql.DB) []Task {
 	var out []Task
 	for rows.Next() {
 		var t Task
-		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.ScheduledAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs, &t.MaxRetries, &t.RetryCount, &t.ParentTaskID, &t.TemplateName)
+		_ = rows.Scan(&t.ID, &t.ClientID, &t.Mode, &t.UpMbps, &t.DownMbps, &t.DurationSec, &t.Density, &t.Status, &t.CreatedAt, &t.StartedAt, &t.FinishedAt, &t.ScheduledAt, &t.UploadBytes, &t.DownloadBytes, &t.Logs, &t.MaxRetries, &t.RetryCount, &t.ParentTaskID, &t.TemplateName, &t.PeerClientID, &t.PeerRole, &t.PeerAddr)
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })

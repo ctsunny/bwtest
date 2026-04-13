@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,9 @@ type Task struct {
 	DurationSec int    `json:"duration_sec"`
 	Density     int    `json:"density"`
 	DataAddr    string `json:"data_addr"`
+	// Peer-transfer fields
+	PeerRole string `json:"peer_role,omitempty"` // "source" or "target"
+	PeerAddr string `json:"peer_addr,omitempty"` // for target: address of source to connect
 }
 
 type ResultReq struct {
@@ -101,6 +105,13 @@ type DataHello struct {
 	Mode        string `json:"mode"`
 	RateMbps    int    `json:"rate_mbps,omitempty"`
 	DurationSec int    `json:"duration_sec"`
+}
+
+type PeerAddrReq struct {
+	ClientID    string `json:"client_id"`
+	ClientToken string `json:"client_token"`
+	TaskID      string `json:"task_id"`
+	Port        string `json:"port"`
 }
 
 func normalizeTaskMode(mode string) string {
@@ -998,6 +1009,8 @@ func runTaskOnce(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, tota
 		return *totalUp, *totalDown, runTraditionalMode(cfg, t, deadline, stopFlag, totalUp, totalDown)
 	case "browse", "stream", "backup":
 		return *totalUp, *totalDown, runProfileMode(cfg, t, deadline, stopFlag, totalUp, totalDown)
+	case "peer":
+		return *totalUp, *totalDown, runPeerMode(cfg, t, deadline, stopFlag, totalUp, totalDown)
 	default:
 		return *totalUp, *totalDown, "failed"
 	}
@@ -1086,6 +1099,124 @@ func readCount(conn net.Conn, stop func() bool, counter *int64) int64 {
 type sshLogEntry struct {
 	Timestamp time.Time
 	Message   string
+}
+
+// ── Peer Transfer ─────────────────────────────────────────────────────────────
+
+// reportPeerAddr calls the server to register the local listen port for this
+// source peer task.  The server will then fill in the target task's peer_addr.
+func reportPeerAddr(cfg *Config, taskID, port string) error {
+	return postJSON(cfg.ServerURL+"/api/peer/addr", PeerAddrReq{
+		ClientID:    cfg.ClientID,
+		ClientToken: cfg.ClientToken,
+		TaskID:      taskID,
+		Port:        port,
+	}, nil)
+}
+
+// runPeerMode runs a direct peer-to-peer bandwidth test.
+//
+// Source role:
+//   - Listens on a random TCP port.
+//   - Reports the port to the server via /api/peer/addr.
+//   - Waits up to 30 s for the target to connect.
+//   - Once connected, both sides send and receive simultaneously at UpMbps.
+//
+// Target role:
+//   - Connects to t.PeerAddr (filled in by the server from the source's report).
+//   - Runs bidirectional transfer until deadline.
+func runPeerMode(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) string {
+	switch t.PeerRole {
+	case "source":
+		return runPeerSource(cfg, t, deadline, stopFlag, totalUp, totalDown)
+	case "target":
+		return runPeerTarget(cfg, t, deadline, stopFlag, totalUp, totalDown)
+	default:
+		log.Printf("[peer task %s] unknown peer_role %q", t.ID, t.PeerRole)
+		return "failed"
+	}
+}
+
+func runPeerSource(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) string {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		log.Printf("[peer-src %s] listen error: %v", t.ID, err)
+		return "connfail"
+	}
+	defer ln.Close()
+	addr := ln.Addr().(*net.TCPAddr)
+	port := strconv.Itoa(addr.Port)
+	log.Printf("[peer-src %s] listening on :%s, reporting to server...", t.ID, port)
+
+	if err := reportPeerAddr(cfg, t.ID, port); err != nil {
+		log.Printf("[peer-src %s] reportPeerAddr error: %v", t.ID, err)
+		return "connfail"
+	}
+	log.Printf("[peer-src %s] address reported, waiting for target to connect (timeout 60s)...", t.ID)
+
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(60 * time.Second))
+	conn, err := ln.Accept()
+	if err != nil {
+		if atomic.LoadInt32(stopFlag) == 1 {
+			return "stopped"
+		}
+		log.Printf("[peer-src %s] accept error (target did not connect in time): %v", t.ID, err)
+		return "connfail"
+	}
+	defer conn.Close()
+	log.Printf("[peer-src %s] target connected from %s, starting transfer", t.ID, conn.RemoteAddr())
+	return runPeerBidirectional(t, conn, deadline, stopFlag, totalUp, totalDown)
+}
+
+func runPeerTarget(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) string {
+	if t.PeerAddr == "" {
+		log.Printf("[peer-tgt %s] no peer_addr from server", t.ID)
+		return "connfail"
+	}
+	log.Printf("[peer-tgt %s] connecting to source at %s...", t.ID, t.PeerAddr)
+	conn, err := net.DialTimeout("tcp", t.PeerAddr, 30*time.Second)
+	if err != nil {
+		log.Printf("[peer-tgt %s] dial error: %v", t.ID, err)
+		return "connfail"
+	}
+	defer conn.Close()
+	log.Printf("[peer-tgt %s] connected to source, starting transfer", t.ID)
+	return runPeerBidirectional(t, conn, deadline, stopFlag, totalUp, totalDown)
+}
+
+// runPeerBidirectional transfers data in both directions simultaneously on conn.
+func runPeerBidirectional(t *Task, conn net.Conn, deadline time.Time, stopFlag *int32, totalUp, totalDown *int64) string {
+	stop := func() bool {
+		return atomic.LoadInt32(stopFlag) == 1 || time.Now().After(deadline)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Upload: write data to peer
+	go func() {
+		defer wg.Done()
+		if t.UpMbps > 0 {
+			pacedUpload(conn, t.UpMbps, stop, totalUp)
+		}
+		// Signal EOF to the remote reader
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+	}()
+
+	// Download: read data from peer
+	go func() {
+		defer wg.Done()
+		readCount(conn, stop, totalDown)
+	}()
+
+	wg.Wait()
+
+	if atomic.LoadInt32(stopFlag) == 1 {
+		return "stopped"
+	}
+	return "done"
 }
 
 type sshLoginEvent struct {
