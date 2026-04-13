@@ -3192,7 +3192,7 @@ func handleGenInstallCmd(panelPath string, cfg *Config) http.HandlerFunc {
 			if platform == "windows" {
 				// PowerShell one-liner: download and invoke the PS1 install script
 				psName := strings.ReplaceAll(name, "'", "''")   // escape single quotes for PS
-				psRemark := strings.ReplaceAll(remark, "'", "'")
+				psRemark := strings.ReplaceAll(remark, "'", "''")
 				scriptURL := "https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.ps1"
 				cmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing '` +
 					scriptURL + `').Content)) -ServerUrl '` + panelURL +
