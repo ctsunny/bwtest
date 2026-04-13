@@ -201,6 +201,31 @@ func TestIsSSHFailedAttemptMessage(t *testing.T) {
 	}
 }
 
+// ── loadOrCreateConfig ────────────────────────────────────────────────────────
+
+func TestLoadOrCreateConfigWithBOM(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.json"
+
+	// Write a JSON config with a UTF-8 BOM prefix (as PowerShell 5 does).
+	jsonBody := []byte(`{"server_url":"http://1.2.3.4:8080","name":"test","init_token":"tok","client_id":"aabbccdd","client_token":"1122334455667788"}`)
+	bom := []byte{0xEF, 0xBB, 0xBF}
+	if err := os.WriteFile(path, append(bom, jsonBody...), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadOrCreateConfig(path)
+	if err != nil {
+		t.Fatalf("loadOrCreateConfig failed with BOM-prefixed config: %v", err)
+	}
+	if cfg.ServerURL != "http://1.2.3.4:8080" {
+		t.Errorf("unexpected ServerURL %q", cfg.ServerURL)
+	}
+	if cfg.Name != "test" {
+		t.Errorf("unexpected Name %q", cfg.Name)
+	}
+}
+
 func TestNormalizeTaskMode(t *testing.T) {
 	tests := map[string]string{
 		"both":        "traditional",

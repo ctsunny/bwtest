@@ -85,7 +85,8 @@ if (Test-Path $ConfigFile) {
   $cfg.init_token  = $InitToken
   $cfg.name        = $ClientName
   if ($Remark -ne '') { $cfg | Add-Member -NotePropertyName remark -NotePropertyValue $Remark -Force }
-  $cfg | ConvertTo-Json | Set-Content -Path $ConfigFile -Encoding UTF8
+  # Use UTF-8 without BOM; PowerShell 5's -Encoding UTF8 adds a BOM which breaks Go's JSON parser.
+  [System.IO.File]::WriteAllText($ConfigFile, ($cfg | ConvertTo-Json), (New-Object System.Text.UTF8Encoding $false))
 } else {
   $cfg = [ordered]@{
     server_url    = $ServerUrl
@@ -95,7 +96,8 @@ if (Test-Path $ConfigFile) {
     client_token  = ''
   }
   if ($Remark -ne '') { $cfg['remark'] = $Remark }
-  $cfg | ConvertTo-Json | Set-Content -Path $ConfigFile -Encoding UTF8
+  # Use UTF-8 without BOM; PowerShell 5's -Encoding UTF8 adds a BOM which breaks Go's JSON parser.
+  [System.IO.File]::WriteAllText($ConfigFile, ($cfg | ConvertTo-Json), (New-Object System.Text.UTF8Encoding $false))
 }
 Log-Info "Config written to $ConfigFile"
 

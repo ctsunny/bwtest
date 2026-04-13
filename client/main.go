@@ -238,6 +238,8 @@ func runAgent(cfgPath string) {
 
 func loadOrCreateConfig(path string) (*Config, error) {
 	if b, err := os.ReadFile(path); err == nil {
+		// Strip UTF-8 BOM written by Windows PowerShell 5's Set-Content -Encoding UTF8.
+		b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 		var cfg Config
 		if err := json.Unmarshal(b, &cfg); err != nil {
 			return nil, err
