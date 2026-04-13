@@ -109,10 +109,12 @@ if ($existingSvc) {
   Start-Sleep -Seconds 2
 }
 
-$binPathArg = "`"$BinPath`" `"$ConfigFile`""
 Log-Info "Registering service '$ServiceName'..."
-& sc.exe create  $ServiceName binPath= $binPathArg start= auto DisplayName= $DisplayName | Out-Null
-& sc.exe description $ServiceName "Automatically runs the bwtest bandwidth-test agent." | Out-Null
+New-Service -Name $ServiceName `
+            -DisplayName $DisplayName `
+            -BinaryPathName "`"$BinPath`" `"$ConfigFile`"" `
+            -StartupType Automatic `
+            -Description "Automatically runs the bwtest bandwidth-test agent."
 # Restart on failure: after 60 s reset, restart 3 times with 3 s delay between attempts
 & sc.exe failure $ServiceName reset= 60 actions= restart/3000/restart/3000/restart/3000 | Out-Null
 
