@@ -1757,7 +1757,7 @@ input:focus, select:focus, textarea:focus {
   tr { display: block; border: 1px solid var(--bdr); border-radius: 10px; margin-bottom: 8px; padding: 6px 0; }
   tbody tr:hover td { background: transparent; }
   .grid { grid-template-columns: 1fr; }
-  .ssh-col { display: none !important; }
+  .ssh-col { display: none; }
 }
 @media (max-width: 480px) { .stats-grid { grid-template-columns: 1fr; } }
 </style>
@@ -3765,9 +3765,10 @@ func handleStopTask(panelPath string, db *sql.DB, broker *Broker) http.HandlerFu
 				}
 			}
 		} else if peerRole == "target" {
-			// Stop the source task (parent)
+			// Stop the source task (parent) - use a JOIN for efficiency
 			var sourceID, sourceStatus, sourceClientID string
-			_ = db.QueryRow(`SELECT id, status, client_id FROM tasks WHERE id=(SELECT parent_task_id FROM tasks WHERE id=?)`, taskID).
+			_ = db.QueryRow(`SELECT t.id, t.status, t.client_id FROM tasks t
+				INNER JOIN tasks child ON t.id = child.parent_task_id WHERE child.id=?`, taskID).
 				Scan(&sourceID, &sourceStatus, &sourceClientID)
 			if sourceID != "" {
 				switch sourceStatus {

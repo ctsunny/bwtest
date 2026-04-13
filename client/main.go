@@ -1174,7 +1174,8 @@ func runPeerTarget(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, to
 		return "connfail"
 	}
 	log.Printf("[peer-tgt %s] connecting to source at %s...", t.ID, t.PeerAddr)
-	conn, err := net.DialTimeout("tcp", t.PeerAddr, 30*time.Second)
+	// Source has a 60-second accept deadline; allow the same window for the dial.
+	conn, err := net.DialTimeout("tcp", t.PeerAddr, 60*time.Second)
 	if err != nil {
 		log.Printf("[peer-tgt %s] dial error: %v", t.ID, err)
 		return "connfail"
