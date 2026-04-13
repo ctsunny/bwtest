@@ -35,6 +35,8 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: windows
+            goarch: amd64
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +45,8 @@ jobs:
           go-version: '1.24'
           cache: true
 
-      - name: Build bwpanel (server)
+      - name: Build bwpanel (server) — Linux only
+        if: matrix.goos == 'linux'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -59,8 +62,10 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
           go build -trimpath -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
-            -o bwagent-${{ matrix.goos }}-${{ matrix.goarch }} \
+            -o bwagent-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} \
             ./client/
 
       - name: Upload artifacts
@@ -70,6 +75,7 @@ jobs:
           path: |
             bwpanel-${{ matrix.goos }}-${{ matrix.goarch }}
             bwagent-${{ matrix.goos }}-${{ matrix.goarch }}
+            bwagent-${{ matrix.goos }}-${{ matrix.goarch }}.exe
 
   release:
     name: Create GitHub Release
@@ -89,7 +95,11 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum bwpanel-linux-amd64 bwpanel-linux-arm64 bwagent-linux-amd64 bwagent-linux-arm64 > SHA256SUMS
+          sha256sum \
+            bwpanel-linux-amd64 bwpanel-linux-arm64 \
+            bwagent-linux-amd64 bwagent-linux-arm64 \
+            bwagent-windows-amd64.exe \
+            > SHA256SUMS
           cat SHA256SUMS
 
       - name: List files
@@ -108,9 +118,14 @@ jobs:
             bash <(curl -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_server.sh)
             ```
 
-            **客户端一键安装 (在面板复制命令):**
+            **Linux 客户端一键安装 (在面板复制命令):**
             ```bash
             curl -fsSL https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | bash -s -- --server-url http://YOUR_IP:PORT --init-token YOUR_TOKEN --client-name my-vps
+            ```
+
+            **Windows 客户端安装 (以管理员身份在 PowerShell 执行):**
+            ```powershell
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.ps1').Content)) -ServerUrl 'http://YOUR_IP:PORT' -InitToken 'YOUR_TOKEN' -ClientName 'my-vps'"
             ```
 
             **升级方式:**
@@ -120,8 +135,9 @@ jobs:
             ## 下载
             | 平台 | 服务端 | 客户端 |
             |---|---|---|
-            | Linux x86_64 | `bwpanel-linux-amd64` | `bwagent-linux-amd64` |
-            | Linux ARM64  | `bwpanel-linux-arm64` | `bwagent-linux-arm64` |
+            | Linux x86_64   | `bwpanel-linux-amd64`   | `bwagent-linux-amd64`         |
+            | Linux ARM64    | `bwpanel-linux-arm64`   | `bwagent-linux-arm64`         |
+            | Windows x86_64 | —                       | `bwagent-windows-amd64.exe`   |
 
             **SHA256SUMS** is included in the release assets for integrity verification.
           files: dist/*

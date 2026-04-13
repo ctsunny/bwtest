@@ -1,6 +1,6 @@
 # bwtest
 
-A lightweight Linux bandwidth test panel and agent.
+A lightweight bandwidth test panel and agent for Linux and Windows.
 
 ## Features
 
@@ -10,9 +10,10 @@ A lightweight Linux bandwidth test panel and agent.
 - Configurable speed (Mbps) and duration (seconds)
 - SQLite persistence (no external DB required)
 - SSE live refresh in the panel
-- Client reports SSH failed-login attempts from the last hour
+- Client reports SSH failed-login attempts from the last hour (Linux)
 - Bark notifications for new clients, tasks, and successful SSH logins
-- Linux amd64 / arm64 release binaries via GitHub Actions
+- Linux amd64 / arm64 and Windows amd64 release binaries via GitHub Actions
+- Windows client runs as a system service (auto-start on boot)
 
 ## Install server
 
@@ -39,6 +40,8 @@ Init Token: <generated or provided>
 
 ## Install client
 
+### Linux
+
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.sh | \
@@ -47,6 +50,15 @@ sudo bash -s -- \
   --init-token 'YourInitToken123' \
   --client-name "$(hostname)"
 ```
+
+### Windows (run in PowerShell **as Administrator**)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ctsunny/bwtest/main/scripts/install_client.ps1').Content)) -ServerUrl 'http://1.2.3.4:8080' -InitToken 'YourInitToken123' -ClientName 'my-vps'"
+```
+
+> **Tip:** The web panel's **接入新客户端** modal can generate the exact command for you —
+> choose *Linux (bash)* or *Windows (PowerShell)* from the **平台** dropdown.
 
 ## Usage
 
@@ -68,6 +80,8 @@ sudo bash -s -- \
 
 ## Useful commands
 
+### Linux
+
 ```bash
 # Server
 systemctl status bwpanel
@@ -80,9 +94,21 @@ journalctl -u bwagent -f
 cat /etc/bwagent/config.json
 ```
 
+### Windows (PowerShell)
+
+```powershell
+# Client
+Get-Service bwagent
+Stop-Service bwagent
+Start-Service bwagent
+Get-EventLog -LogName Application -Source bwagent -Newest 20
+Get-Content "$env:ProgramData\bwagent\config.json"
+```
+
 ## Uninstall completely
 
-**Uninstall Server:**
+### Uninstall Server (Linux)
+
 ```bash
 systemctl stop bwpanel
 systemctl disable bwpanel
@@ -93,7 +119,8 @@ rm -rf /opt/bwtest
 systemctl daemon-reload
 ```
 
-**Uninstall Client:**
+### Uninstall Client — Linux
+
 ```bash
 systemctl stop bwagent
 systemctl disable bwagent
@@ -104,6 +131,15 @@ rm -rf /opt/bwtest/client_source
 systemctl daemon-reload
 ```
 
+### Uninstall Client — Windows (PowerShell **as Administrator**)
+
+```powershell
+Stop-Service bwagent -Force -ErrorAction SilentlyContinue
+sc.exe delete bwagent
+Remove-Item -Recurse -Force "$env:ProgramFiles\bwagent"
+Remove-Item -Recurse -Force "$env:ProgramData\bwagent"
+```
+
 ## Release a new version
 
 ```bash
@@ -111,4 +147,4 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-GitHub Actions will build binaries for linux/amd64 and linux/arm64 and attach them to the release automatically.
+GitHub Actions will build binaries for linux/amd64, linux/arm64, and windows/amd64 and attach them to the release automatically.

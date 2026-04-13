@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -117,6 +118,24 @@ var sshAttemptsLastHour int64
 
 // shutdownCh is closed when a shutdown signal is received.
 var shutdownCh = make(chan struct{})
+var shutdownOnce sync.Once
+
+// shutdown closes shutdownCh exactly once; safe to call from multiple goroutines.
+func shutdown() {
+	shutdownOnce.Do(func() { close(shutdownCh) })
+}
+
+// defaultConfigPath returns the platform-appropriate config file path.
+func defaultConfigPath() string {
+	if runtime.GOOS == "windows" {
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return filepath.Join(programData, "bwagent", "config.json")
+	}
+	return "/etc/bwagent/config.json"
+}
 
 type logBuffer struct {
 	lines []string
@@ -154,11 +173,25 @@ func (lb *logBuffer) Clear() {
 var logBuf = &logBuffer{max: 200}
 
 func main() {
-	cfgPath := "/etc/bwagent/config.json"
+	cfgPath := defaultConfigPath()
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
 	}
 
+	// On Windows, detect if we are running as a Windows service and hand off
+	// control to the SCM. maybeRunAsWindowsService blocks until the service
+	// stops and returns true; it is a no-op (returns false) on non-Windows.
+	if maybeRunAsWindowsService(func() { runAgent(cfgPath) }) {
+		return
+	}
+
+	runAgent(cfgPath)
+}
+
+// runAgent initialises the config, sets up graceful shutdown, and runs the
+// register / heartbeat / poll loops. It is called both from main() directly
+// (interactive) and from the Windows service handler goroutine.
+func runAgent(cfgPath string) {
 	cfg, err := loadOrCreateConfig(cfgPath)
 	if err != nil {
 		log.Fatal(err)
@@ -174,7 +207,7 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		s := <-sig
 		log.Printf("bwagent: received %v, shutting down gracefully...", s)
-		close(shutdownCh)
+		shutdown()
 	}()
 
 	// register with retry
@@ -228,7 +261,7 @@ func loadOrCreateConfig(path string) (*Config, error) {
 		ClientToken: token(16),
 	}
 
-	_ = os.MkdirAll("/etc/bwagent", 0755)
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
 	b, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(path, b, 0600); err != nil {
 		return nil, err
@@ -1070,6 +1103,9 @@ func (e sshLoginEvent) key() string {
 }
 
 func sshMonitorLoop(cfg *Config) {
+	if runtime.GOOS != "linux" {
+		return
+	}
 	successTicker := time.NewTicker(30 * time.Second)
 	failedTicker := time.NewTicker(time.Minute)
 	defer successTicker.Stop()
@@ -1128,6 +1164,9 @@ func sshMonitorLoop(cfg *Config) {
 }
 
 func refreshSSHFailedAttempts() {
+	if runtime.GOOS != "linux" {
+		return
+	}
 	count, err := countSSHFailedAttemptsSince(time.Now().Add(-time.Hour))
 	if err != nil {
 		log.Printf("[ssh] 统计最近 1 小时失败尝试失败: %v", err)
@@ -1442,7 +1481,12 @@ func selfUpgrade(version string) {
 		return
 	}
 
-	binaryName := fmt.Sprintf("bwagent-linux-%s", arch)
+	var binaryName string
+	if runtime.GOOS == "windows" {
+		binaryName = fmt.Sprintf("bwagent-windows-%s.exe", arch)
+	} else {
+		binaryName = fmt.Sprintf("bwagent-%s-%s", runtime.GOOS, arch)
+	}
 	var dlURL, sha256SumsURL string
 	if version == "latest" {
 		dlURL = fmt.Sprintf("https://github.com/ctsunny/bwtest/releases/latest/download/%s", binaryName)
@@ -1511,18 +1555,11 @@ func selfUpgrade(version string) {
 		return
 	}
 	_ = os.Remove(backupPath)
-	log.Printf("[upgrade] 二进制替换成功，即将退出由 systemd 以新版本重启...")
+	log.Printf("[upgrade] 二进制替换成功，即将退出由服务管理器以新版本重启...")
 
 	// 延迟 1 秒确保当前心跳响应已处理完毕
 	time.Sleep(time.Second)
 	restartAgentService("upgrade")
-}
-
-func restartAgentService(reason string) {
-	if err := exec.Command("sudo", "-n", "systemctl", "restart", "bwagent").Run(); err != nil {
-		log.Printf("[%s] sudo systemctl restart 不可用(%v)，通过 os.Exit(0) 触发 systemd respawn", reason, err)
-	}
-	os.Exit(0)
 }
 
 // verifySHA256 downloads SHA256SUMS from sumsURL and verifies that the file at
