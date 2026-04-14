@@ -127,6 +127,11 @@ var busy int32
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 var sshAttemptsLastHour int64
 
+// sshLogAvailable is set once at startup: true if the process can read SSH logs
+// via journalctl or /var/log/auth.log|secure. When false, the SSH monitor loop
+// skips all scan attempts and suppresses repeated error messages.
+var sshLogAvailable bool
+
 // shutdownCh is closed when a shutdown signal is received.
 var shutdownCh = make(chan struct{})
 var shutdownOnce sync.Once
@@ -241,6 +246,12 @@ func runAgent(cfgPath string) {
 		break
 	}
 
+	if runtime.GOOS == "linux" {
+		sshLogAvailable = probeSSHLogAccess()
+		if !sshLogAvailable {
+			log.Printf("[ssh] 无法访问系统日志 (journalctl 权限不足且未找到 /var/log/auth.log|secure)，SSH 监控已禁用")
+		}
+	}
 	refreshSSHFailedAttempts()
 	go sshMonitorLoop(cfg)
 	go heartbeatLoop(cfg)
@@ -1277,8 +1288,39 @@ func (e sshLoginEvent) key() string {
 	}, "|")
 }
 
+// probeSSHLogAccess checks whether the current process can read SSH login logs
+// via journalctl or the auth log files. It returns true if at least one source
+// is usable. Call once at startup; if false, skip SSH monitoring entirely.
+func probeSSHLogAccess() bool {
+	// Try each journalctl command with a short time window.
+	since := time.Now().Add(-time.Minute)
+	commands := [][]string{
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "SYSLOG_IDENTIFIER=sshd"},
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "-t", "sshd"},
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "-u", "ssh.service"},
+		{"--no-pager", "--since", since.Format(time.RFC3339), "-o", "short-iso", "-u", "sshd.service"},
+	}
+	for _, args := range commands {
+		cmd := exec.Command("journalctl", args...)
+		if err := cmd.Run(); err == nil {
+			return true
+		}
+	}
+	// Fall back to auth log files.
+	for _, path := range []string{"/var/log/auth.log", "/var/log/secure"} {
+		if f, err := os.Open(path); err == nil {
+			_ = f.Close()
+			return true
+		}
+	}
+	return false
+}
+
 func sshMonitorLoop(cfg *Config) {
 	if runtime.GOOS != "linux" {
+		return
+	}
+	if !sshLogAvailable {
 		return
 	}
 	successTicker := time.NewTicker(30 * time.Second)
@@ -1339,7 +1381,7 @@ func sshMonitorLoop(cfg *Config) {
 }
 
 func refreshSSHFailedAttempts() {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" || !sshLogAvailable {
 		return
 	}
 	count, err := countSSHFailedAttemptsSince(time.Now().Add(-time.Hour))
