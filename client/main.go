@@ -1201,9 +1201,10 @@ func runPeerSource(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, to
 
 	// Wait up to the remaining task duration for the target to connect.
 	acceptDeadline := deadline
-	if time.Until(acceptDeadline) > 5*time.Minute {
-		// Cap the initial wait at 5 minutes; the retry loop handles reconnects.
-		acceptDeadline = time.Now().Add(5 * time.Minute)
+	if time.Until(acceptDeadline) > 60*time.Second {
+		// Cap the initial wait at 60s so the source can retry on a new port
+		// if no target arrives in time, rather than blocking for the full task.
+		acceptDeadline = time.Now().Add(60 * time.Second)
 	}
 	log.Printf("[peer-src %s] address reported, waiting for target to connect (timeout %.0fs)...", t.ID, time.Until(acceptDeadline).Seconds())
 	_ = ln.(*net.TCPListener).SetDeadline(acceptDeadline)
@@ -1226,8 +1227,9 @@ func runPeerTarget(cfg *Config, t *Task, deadline time.Time, stopFlag *int32, to
 		return "connfail"
 	}
 	log.Printf("[peer-tgt %s] connecting to source at %s...", t.ID, t.PeerAddr)
-	// Source has a 60-second accept deadline; allow the same window for the dial.
-	conn, err := net.DialTimeout("tcp", t.PeerAddr, 60*time.Second)
+	// Use half the source's 60s accept window as the dial timeout so a timed-out
+	// first attempt still leaves time for one retry within the same source window.
+	conn, err := net.DialTimeout("tcp", t.PeerAddr, 30*time.Second)
 	if err != nil {
 		log.Printf("[peer-tgt %s] dial error: %v", t.ID, err)
 		return "connfail"
