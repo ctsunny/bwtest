@@ -1309,7 +1309,7 @@ func probeSSHLogAccess() bool {
 	// Fall back to auth log files.
 	for _, path := range []string{"/var/log/auth.log", "/var/log/secure"} {
 		if f, err := os.Open(path); err == nil {
-			f.Close()
+			_ = f.Close()
 			return true
 		}
 	}
