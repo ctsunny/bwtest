@@ -4042,14 +4042,9 @@ func handlePeerAddr(db *sql.DB, broker *Broker) http.HandlerFunc {
 			http.Error(w, "task not found or not a peer source task", 400)
 			return
 		}
-		// Build the peer address from the client's known remote IP + reported port
-		var remoteIP string
-		_ = db.QueryRow(`SELECT remote_ip FROM clients WHERE id=?`, req.ClientID).Scan(&remoteIP)
-		// remoteIP may include port (from r.RemoteAddr), strip it
-		host, _, err2 := net.SplitHostPort(remoteIP)
-		if err2 != nil {
-			host = remoteIP // already plain IP
-		}
+		// Build the peer address using the current request's remote IP so it is
+		// always fresh (avoids stale DB values after IP changes).
+		host := realIP(r)
 		peerAddr := net.JoinHostPort(host, req.Port)
 		// Update the target task's peer_addr so it can be dispatched
 		_, _ = db.Exec(`UPDATE tasks SET peer_addr=? WHERE parent_task_id=? AND peer_role='target'`, peerAddr, req.TaskID)
